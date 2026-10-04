@@ -32,6 +32,8 @@ data class ChatUiState(
     val errorMessage: String? = null
 )
 
+import com.offlinechat.data.transport.MessageSyncEngine
+
 @HiltViewModel
 class ChatViewModel @Inject constructor(
     private val savedStateHandle: SavedStateHandle,
@@ -41,7 +43,8 @@ class ChatViewModel @Inject constructor(
     private val getLocalDeviceIdentityUseCase: GetLocalDeviceIdentityUseCase,
     private val messageRepository: MessageRepository,
     private val peerRepository: PeerRepository,
-    private val messageTransport: MessageTransport
+    private val messageTransport: MessageTransport,
+    private val messageSyncEngine: MessageSyncEngine
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ChatUiState())
@@ -58,10 +61,16 @@ class ChatViewModel @Inject constructor(
             peerDisplayName = pName
         )
 
+        messageSyncEngine.setActiveConversation(convoId)
         observeLocalIdentity()
         observeMessages(convoId)
         observeConnectionState(pId)
         markRead(convoId)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        messageSyncEngine.setActiveConversation(null)
     }
 
     private fun observeLocalIdentity() {
@@ -147,12 +156,12 @@ class ChatViewModel @Inject constructor(
 
     fun retryMessage(message: Message) {
         viewModelScope.launch {
-            sendMessageUseCase(
-                conversationId = message.conversationId,
-                senderId = message.senderId,
-                receiverId = message.receiverId,
-                text = message.text
-            )
+            val result = sendMessageUseCase.retry(message)
+            if (result.isFailure) {
+                _uiState.value = _uiState.value.copy(
+                    errorMessage = result.exceptionOrNull()?.message ?: "Retry failed"
+                )
+            }
         }
     }
 

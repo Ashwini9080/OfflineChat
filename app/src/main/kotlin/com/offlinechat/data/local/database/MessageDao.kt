@@ -24,7 +24,7 @@ interface MessageDao {
     @Query("UPDATE messages SET status = :status WHERE id = :id")
     suspend fun updateMessageStatus(id: String, status: String)
 
-    @Query("SELECT * FROM messages WHERE receiver_id = :receiverId AND status IN ('PENDING', 'FAILED') AND is_outbound = 1 ORDER BY timestamp ASC")
+    @Query("SELECT * FROM messages WHERE receiver_id = :receiverId AND status IN ('PENDING', 'SENDING', 'FAILED') AND is_outbound = 1 ORDER BY timestamp ASC")
     suspend fun getPendingOutboundMessagesForPeer(receiverId: String): List<MessageEntity>
 
     @Query("DELETE FROM messages WHERE conversation_id = :conversationId")

@@ -14,5 +14,6 @@ interface ConversationRepository {
     ): Conversation
     suspend fun updateLastMessage(conversationId: String, text: String, timestamp: Long)
     suspend fun markAsRead(conversationId: String)
+    suspend fun incrementUnreadCount(conversationId: String)
     suspend fun deleteConversation(id: String)
 }

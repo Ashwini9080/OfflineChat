@@ -13,9 +13,24 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
+
+    val MIGRATION_1_2 = object : Migration(1, 2) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // Indexes for fast message filtering and offline queue queries
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_messages_receiver_id_status ON messages(receiver_id, status)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_messages_status ON messages(status)")
+
+            // Unique peer_id index to prevent duplicate conversations and activity index for fast recency sort
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_conversations_peer_id ON conversations(peer_id)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_conversations_last_activity_at ON conversations(last_activity_at)")
+        }
+    }
 
     @Provides
     @Singleton
@@ -24,7 +39,9 @@ object DatabaseModule {
             context,
             AppDatabase::class.java,
             "offline_chat_clean.db"
-        ).build()
+        )
+            .addMigrations(MIGRATION_1_2)
+            .build()
     }
 
     @Provides

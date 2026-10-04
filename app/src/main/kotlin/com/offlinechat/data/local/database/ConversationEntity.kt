@@ -4,7 +4,15 @@ import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "conversations")
+import androidx.room.Index
+
+@Entity(
+    tableName = "conversations",
+    indices = [
+        Index(value = ["peer_id"], unique = true),
+        Index(value = ["last_activity_at"])
+    ]
+)
 data class ConversationEntity(
     @PrimaryKey
     @ColumnInfo(name = "id")

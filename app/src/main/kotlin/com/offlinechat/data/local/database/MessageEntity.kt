@@ -17,7 +17,9 @@ import androidx.room.PrimaryKey
         )
     ],
     indices = [
-        Index(value = ["conversation_id", "timestamp"])
+        Index(value = ["conversation_id", "timestamp"]),
+        Index(value = ["receiver_id", "status"]),
+        Index(value = ["status"])
     ]
 )
 data class MessageEntity(

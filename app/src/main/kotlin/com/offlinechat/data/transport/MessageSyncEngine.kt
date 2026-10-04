@@ -23,6 +23,13 @@ import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.ConcurrentHashMap
+
 /**
  * Centralized, application-scoped message synchronization and delivery engine.
  *
@@ -31,8 +38,10 @@ import javax.inject.Singleton
  * 2. Validates, deduplicates, and saves incoming chat messages to Room SQLite database via [ReceiveMessageUseCase].
  * 3. Triggers bidirectional DELIVERY_ACK delivery receipts upon message receipt.
  * 4. Handles incoming ACK receipts to transition outbound messages from SENT -> DELIVERED.
- * 5. Handles mutual handshakes to link peer identities and start foreground services.
- * 6. Flushes pending offline message queues automatically when a peer reconnects.
+ * 5. Enforces a 15-second delivery ACK timeout transitioning unacknowledged SENT messages to FAILED.
+ * 6. Tracks active UI conversation to accurately increment unread counts when user is not viewing the chat.
+ * 7. Handles mutual handshakes to link peer identities and start foreground services.
+ * 8. Flushes pending offline message queues automatically when a peer reconnects.
  */
 @Singleton
 class MessageSyncEngine @Inject constructor(
@@ -46,10 +55,36 @@ class MessageSyncEngine @Inject constructor(
 ) {
     companion object {
         private const val TAG = "MessageSyncEngine"
+        const val ACK_TIMEOUT_MS = 15_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true }
+
+    // Active conversation currently displayed to user in ChatScreen
+    private val _activeConversationId = MutableStateFlow<String?>(null)
+    val activeConversationId: StateFlow<String?> = _activeConversationId.asStateFlow()
+
+    // Map of messageId -> Job for ACK timeout detection
+    private val ackTimeouts = ConcurrentHashMap<String, Job>()
+
+    fun setActiveConversation(conversationId: String?) {
+        _activeConversationId.value = conversationId
+    }
+
+    fun watchAckTimeout(messageId: String, timeoutMillis: Long = ACK_TIMEOUT_MS) {
+        ackTimeouts.remove(messageId)?.cancel()
+        val job = scope.launch {
+            delay(timeoutMillis)
+            val current = messageRepository.getMessageById(messageId)
+            if (current != null && (current.status == MessageStatus.SENT || current.status == MessageStatus.SENDING)) {
+                Log.w(TAG, "Delivery ACK timed out after ${timeoutMillis}ms for message: $messageId -> marked FAILED")
+                messageRepository.updateMessageStatus(messageId, MessageStatus.FAILED)
+            }
+            ackTimeouts.remove(messageId)
+        }
+        ackTimeouts[messageId] = job
+    }
 
     fun start() {
         scope.launch {
@@ -120,6 +155,15 @@ class MessageSyncEngine @Inject constructor(
             val savedMessage = result.getOrNull()
             if (savedMessage != null) {
                 Log.i(TAG, "Saved incoming message [${savedMessage.id}] from ${savedMessage.senderId}")
+
+                // Update unread count if user is not currently viewing this conversation
+                val targetConversationId = savedMessage.conversationId
+                if (_activeConversationId.value != targetConversationId) {
+                    conversationRepository.incrementUnreadCount(targetConversationId)
+                    Log.d(TAG, "Incremented unread count for conversation: $targetConversationId")
+                } else {
+                    conversationRepository.markAsRead(targetConversationId)
+                }
             } else {
                 Log.d(TAG, "Message [${envelope.messageId}] was duplicate; skipping storage")
             }
@@ -144,8 +188,9 @@ class MessageSyncEngine @Inject constructor(
 
     private suspend fun handleAck(envelope: MessageEnvelope) {
         try {
-            val originalMessageId = String(envelope.payload, Charsets.UTF_8)
+            val originalMessageId = String(envelope.payload, Charsets.UTF_8).trim()
             Log.i(TAG, "Received delivery ACK for message ID: $originalMessageId")
+            ackTimeouts.remove(originalMessageId)?.cancel()
             messageRepository.updateMessageStatus(originalMessageId, MessageStatus.DELIVERED)
         } catch (e: Exception) {
             Log.e(TAG, "Error processing ACK", e)
@@ -154,9 +199,10 @@ class MessageSyncEngine @Inject constructor(
 
     private suspend fun handleReadReceipt(envelope: MessageEnvelope) {
         try {
-            val originalMessageId = String(envelope.payload, Charsets.UTF_8)
+            val originalMessageId = String(envelope.payload, Charsets.UTF_8).trim()
             Log.d(TAG, "Received READ receipt for message ID: $originalMessageId")
-            // READ receipt can also confirm delivery
+            // READ receipt also confirms delivery
+            ackTimeouts.remove(originalMessageId)?.cancel()
             messageRepository.updateMessageStatus(originalMessageId, MessageStatus.DELIVERED)
         } catch (e: Exception) {
             Log.e(TAG, "Error processing READ receipt", e)
@@ -169,6 +215,9 @@ class MessageSyncEngine @Inject constructor(
 
         Log.d(TAG, "Flushing ${pending.size} pending offline messages for peer: $peerId")
         for (msg in pending) {
+            // 1. Transition to SENDING
+            messageRepository.updateMessageStatus(msg.id, MessageStatus.SENDING)
+
             val envelope = MessageEnvelope(
                 protocolVersion = 1,
                 messageId = msg.id,
@@ -181,9 +230,13 @@ class MessageSyncEngine @Inject constructor(
             )
             val result = transport.sendEnvelope(envelope)
             if (result.isSuccess) {
+                // 2. Transition to SENT and register ACK timeout watcher
                 messageRepository.updateMessageStatus(msg.id, MessageStatus.SENT)
-                Log.d(TAG, "Successfully flushed message [${msg.id}] to $peerId")
+                watchAckTimeout(msg.id)
+                Log.d(TAG, "Successfully flushed message [${msg.id}] to $peerId (SENT, awaiting ACK)")
             } else {
+                // 3. Mark FAILED on network/socket write failure
+                messageRepository.updateMessageStatus(msg.id, MessageStatus.FAILED)
                 Log.w(TAG, "Failed to flush pending message [${msg.id}]", result.exceptionOrNull())
                 break
             }

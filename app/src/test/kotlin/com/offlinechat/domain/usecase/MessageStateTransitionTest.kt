@@ -1,5 +1,6 @@
 package com.offlinechat.domain.usecase
 
+import com.offlinechat.data.transport.MessageSyncEngine
 import com.offlinechat.data.transport.MessageTransport
 import com.offlinechat.domain.model.Message
 import com.offlinechat.domain.model.MessageStatus
@@ -20,6 +21,7 @@ class MessageStateTransitionTest {
     private lateinit var messageRepository: MessageRepository
     private lateinit var conversationRepository: ConversationRepository
     private lateinit var transport: MessageTransport
+    private lateinit var syncEngine: MessageSyncEngine
     private lateinit var sendMessageUseCase: SendMessageUseCase
 
     @Before
@@ -27,11 +29,17 @@ class MessageStateTransitionTest {
         messageRepository = mockk(relaxed = true)
         conversationRepository = mockk(relaxed = true)
         transport = mockk(relaxed = true)
-        sendMessageUseCase = SendMessageUseCase(messageRepository, conversationRepository, transport)
+        syncEngine = mockk(relaxed = true)
+        sendMessageUseCase = SendMessageUseCase(
+            messageRepository = messageRepository,
+            conversationRepository = conversationRepository,
+            transport = transport,
+            syncEngine = syncEngine
+        )
     }
 
     @Test
-    fun `successful outbound transmission transitions from PENDING to SENT`() = runTest {
+    fun `successful outbound transmission transitions PENDING to SENDING to SENT to DELIVERED`() = runTest {
         coEvery { transport.sendEnvelope(any()) } returns Result.success(Unit)
 
         val result = sendMessageUseCase(
@@ -47,11 +55,17 @@ class MessageStateTransitionTest {
         // 1. Initial saved state was PENDING
         coVerify { messageRepository.saveMessage(match { it.status == MessageStatus.PENDING }) }
 
-        // 2. Updated to SENT upon successful transport write
+        // 2. Updated to SENDING while in transport pipeline
+        coVerify { messageRepository.updateMessageStatus(message.id, MessageStatus.SENDING) }
+
+        // 3. Updated to SENT upon successful transport write
         coVerify { messageRepository.updateMessageStatus(message.id, MessageStatus.SENT) }
         assertEquals(MessageStatus.SENT, message.status)
 
-        // 3. Simulated ACK receipt transitions to DELIVERED
+        // 4. Registered ACK timeout watcher
+        coVerify { syncEngine.watchAckTimeout(message.id) }
+
+        // 5. Simulated incoming ACK receipt transitions to DELIVERED
         messageRepository.updateMessageStatus(message.id, MessageStatus.DELIVERED)
         coVerify { messageRepository.updateMessageStatus(message.id, MessageStatus.DELIVERED) }
     }
@@ -72,7 +86,10 @@ class MessageStateTransitionTest {
         // 1. Initial saved state was PENDING
         coVerify { messageRepository.saveMessage(match { it.status == MessageStatus.PENDING }) }
 
-        // 2. Updated to FAILED upon transport failure
+        // 2. Transitioned to SENDING
+        coVerify { messageRepository.updateMessageStatus(any(), MessageStatus.SENDING) }
+
+        // 3. Updated to FAILED upon transport failure
         coVerify { messageRepository.updateMessageStatus(any(), MessageStatus.FAILED) }
     }
 }

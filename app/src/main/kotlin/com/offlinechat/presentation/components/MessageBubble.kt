@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -28,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.offlinechat.domain.model.Message
@@ -94,34 +96,84 @@ fun MessageBubble(
                         style = MaterialTheme.typography.labelSmall,
                         fontSize = 10.sp
                     )
-
                     if (isOutbound) {
                         Spacer(modifier = Modifier.width(4.dp))
                         when (message.status) {
-                            MessageStatus.PENDING -> Icon(
-                                imageVector = Icons.Default.AccessTime,
-                                contentDescription = "Pending",
-                                tint = Color(0xFFA7F3D0),
-                                modifier = Modifier.size(11.dp)
-                            )
-                            MessageStatus.SENT -> Icon(
-                                imageVector = Icons.Default.Check,
-                                contentDescription = "Sent",
-                                tint = Color(0xFFA7F3D0),
-                                modifier = Modifier.size(12.dp)
-                            )
-                            MessageStatus.DELIVERED -> Icon(
-                                imageVector = Icons.Default.DoneAll,
-                                contentDescription = "Delivered",
-                                tint = Color(0xFF6EE7B7),
-                                modifier = Modifier.size(13.dp)
-                            )
-                            MessageStatus.FAILED -> Icon(
-                                imageVector = Icons.Default.ErrorOutline,
-                                contentDescription = "Failed",
-                                tint = AccentRose,
-                                modifier = Modifier.size(12.dp)
-                            )
+                            MessageStatus.PENDING -> {
+                                Icon(
+                                    imageVector = Icons.Default.AccessTime,
+                                    contentDescription = "Pending",
+                                    tint = Color(0xFFA7F3D0),
+                                    modifier = Modifier.size(11.dp)
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text(
+                                    text = "Pending",
+                                    color = Color(0xFFA7F3D0),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 9.sp
+                                )
+                            }
+                            MessageStatus.SENDING -> {
+                                CircularProgressIndicator(
+                                    color = Color(0xFFA7F3D0),
+                                    strokeWidth = 1.2.dp,
+                                    modifier = Modifier.size(10.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = "Sending...",
+                                    color = Color(0xFFA7F3D0),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 9.sp
+                                )
+                            }
+                            MessageStatus.SENT -> {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Sent",
+                                    tint = Color(0xFFA7F3D0),
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text(
+                                    text = "Sent",
+                                    color = Color(0xFFA7F3D0),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 9.sp
+                                )
+                            }
+                            MessageStatus.DELIVERED -> {
+                                Icon(
+                                    imageVector = Icons.Default.DoneAll,
+                                    contentDescription = "Delivered",
+                                    tint = Color(0xFF6EE7B7),
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text(
+                                    text = "Delivered",
+                                    color = Color(0xFF6EE7B7),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            MessageStatus.FAILED -> {
+                                Icon(
+                                    imageVector = Icons.Default.ErrorOutline,
+                                    contentDescription = "Failed",
+                                    tint = AccentRose,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text(
+                                    text = "Failed",
+                                    color = AccentRose,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 9.sp
+                                )
+                            }
                         }
                     }
                 }
@@ -131,8 +183,11 @@ fun MessageBubble(
         AnimatedVisibility(visible = isOutbound && message.status == MessageStatus.FAILED) {
             Row(
                 modifier = Modifier
-                    .padding(top = 2.dp, end = 4.dp)
-                    .clickable { onRetryClick?.invoke(message) },
+                    .padding(top = 3.dp, end = 4.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF3B151E))
+                    .clickable { onRetryClick?.invoke(message) }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -141,13 +196,15 @@ fun MessageBubble(
                     tint = AccentRose,
                     modifier = Modifier.size(13.dp)
                 )
-                Spacer(modifier = Modifier.width(3.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = "Delivery failed. Tap to retry",
+                    text = "Message failed · [Retry]",
                     color = AccentRose,
-                    style = MaterialTheme.typography.labelSmall
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
     }
 }
+

@@ -21,6 +21,7 @@ class SendMessageUseCaseTest {
     private lateinit var messageRepository: MessageRepository
     private lateinit var conversationRepository: ConversationRepository
     private lateinit var transport: MessageTransport
+    private lateinit var syncEngine: com.offlinechat.data.transport.MessageSyncEngine
     private lateinit var useCase: SendMessageUseCase
 
     @Before
@@ -28,11 +29,13 @@ class SendMessageUseCaseTest {
         messageRepository = mockk(relaxed = true)
         conversationRepository = mockk(relaxed = true)
         transport = mockk(relaxed = true)
+        syncEngine = mockk(relaxed = true)
 
         useCase = SendMessageUseCase(
             messageRepository = messageRepository,
             conversationRepository = conversationRepository,
-            transport = transport
+            transport = transport,
+            syncEngine = syncEngine
         )
     }
 
@@ -72,5 +75,38 @@ class SendMessageUseCaseTest {
         val capturedStatus = slot<MessageStatus>()
         coVerify { messageRepository.updateMessageStatus(any(), capture(capturedStatus)) }
         assertEquals(MessageStatus.FAILED, capturedStatus.captured)
+    }
+
+    @Test
+    fun `retry reuses original messageId without creating duplicate records`() = runTest {
+        val originalMessage = Message(
+            id = "original-msg-123",
+            conversationId = "convo-1",
+            senderId = "user-a",
+            receiverId = "user-b",
+            text = "Retrying this message",
+            timestamp = 1700000000L,
+            status = MessageStatus.FAILED,
+            isOutbound = true
+        )
+
+        coEvery { transport.sendEnvelope(any()) } returns Result.success(Unit)
+
+        val result = useCase.retry(originalMessage)
+
+        assertTrue(result.isSuccess)
+        val retriedMessage = result.getOrThrow()
+
+        // 1. Same message ID reused
+        assertEquals("original-msg-123", retriedMessage.id)
+        assertEquals(MessageStatus.SENT, retriedMessage.status)
+
+        // 2. Verified no new saveMessage call was made (prevents duplicates)
+        coVerify(exactly = 0) { messageRepository.saveMessage(any()) }
+
+        // 3. Status transitioned to SENDING then SENT
+        coVerify { messageRepository.updateMessageStatus("original-msg-123", MessageStatus.SENDING) }
+        coVerify { messageRepository.updateMessageStatus("original-msg-123", MessageStatus.SENT) }
+        coVerify { syncEngine.watchAckTimeout("original-msg-123") }
     }
 }

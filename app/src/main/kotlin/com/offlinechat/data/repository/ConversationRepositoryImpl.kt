@@ -57,6 +57,10 @@ class ConversationRepositoryImpl @Inject constructor(
         conversationDao.markAsRead(conversationId)
     }
 
+    override suspend fun incrementUnreadCount(conversationId: String) {
+        conversationDao.incrementUnreadCount(conversationId)
+    }
+
     override suspend fun deleteConversation(id: String) {
         conversationDao.deleteConversation(id)
     }
