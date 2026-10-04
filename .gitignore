@@ -1,0 +1,33 @@
+# ── Build outputs ──────────────────────────────────────────────
+.gradle/
+build/
+**/build/
+
+# ── Android Studio / IntelliJ IDEA / VSCode ────────────────────────
+.idea/
+.vscode/
+.codesight/
+*.iml
+*.iws
+*.ipr
+local.properties
+
+# ── Kotlin / JVM ────────────────────────────────────────────────
+*.class
+*.jar
+*.war
+*.ear
+
+# ── MacOS ───────────────────────────────────────────────────────
+.DS_Store
+
+# ── Signing keystores (NEVER commit) ────────────────────────────
+*.jks
+*.keystore
+keystore.properties
+
+# ── Sensitive config ────────────────────────────────────────────
+secrets.properties
+
+# ── Generated sources ────────────────────────────────────────────
+**/generated/

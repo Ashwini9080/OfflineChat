@@ -1,0 +1,323 @@
+package com.offlinechat.presentation.chats
+
+import android.content.Context
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.offlinechat.data.discovery.BluetoothPermissionHelper
+import com.offlinechat.domain.model.DiscoveryStatus
+import com.offlinechat.domain.model.Peer
+import com.offlinechat.domain.usecase.ConnectPeerUseCase
+import com.offlinechat.domain.usecase.DiscoverPeersUseCase
+import com.offlinechat.domain.usecase.GetLocalDeviceIdentityUseCase
+import com.offlinechat.service.ConnectionForegroundService
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+data class DiscoveryUiState(
+    val isScanning: Boolean = false,
+    val discoveryStatus: DiscoveryStatus = DiscoveryStatus.Idle,
+    val peers: List<Peer> = emptyList(),
+    val connectingPeerId: String? = null,
+    val pendingTrustPeer: Peer? = null,
+    val errorMessage: String? = null,
+    val missingPermissions: List<String> = emptyList(),
+    val isBluetoothDisabled: Boolean = false,
+    val isBluetoothUnavailable: Boolean = false,
+    val showPermissionRationale: Boolean = false,
+    val isPermissionPermanentlyDenied: Boolean = false
+)
+
+sealed interface DiscoveryNavigationEvent {
+    data class OpenChat(
+        val conversationId: String,
+        val peerId: String,
+        val peerDisplayName: String
+    ) : DiscoveryNavigationEvent
+}
+
+@HiltViewModel
+class DiscoveryViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val discoverPeersUseCase: DiscoverPeersUseCase,
+    private val connectPeerUseCase: ConnectPeerUseCase,
+    private val getLocalDeviceIdentityUseCase: GetLocalDeviceIdentityUseCase,
+    val permissionHelper: BluetoothPermissionHelper
+) : ViewModel() {
+
+    private val _uiState = MutableStateFlow(DiscoveryUiState())
+    val uiState: StateFlow<DiscoveryUiState> = _uiState.asStateFlow()
+
+    private val _navEvents = MutableSharedFlow<DiscoveryNavigationEvent>()
+    val navEvents: SharedFlow<DiscoveryNavigationEvent> = _navEvents.asSharedFlow()
+
+    private var localDisplayName = ""
+    private var localDeviceId = ""
+
+    init {
+        observePeers()
+        observeDiscoveryStatus()
+        observeIdentity()
+    }
+
+    private fun observeIdentity() {
+        viewModelScope.launch {
+            getLocalDeviceIdentityUseCase().collect { identity ->
+                localDisplayName = identity.displayName
+                localDeviceId = identity.deviceId
+                // Pre-check permissions before automatic scan
+                if (permissionHelper.hasRequiredPermissions() && permissionHelper.isBluetoothEnabled()) {
+                    startScan()
+                } else if (!permissionHelper.isBluetoothEnabled()) {
+                    _uiState.value = _uiState.value.copy(isBluetoothDisabled = true)
+                } else if (!permissionHelper.hasRequiredPermissions()) {
+                    _uiState.value = _uiState.value.copy(
+                        missingPermissions = permissionHelper.getMissingPermissions(),
+                        showPermissionRationale = true
+                    )
+                }
+            }
+        }
+    }
+
+    private fun observePeers() {
+        viewModelScope.launch {
+            discoverPeersUseCase.discoveredPeers.collect { list ->
+                _uiState.value = _uiState.value.copy(peers = list)
+            }
+        }
+        viewModelScope.launch {
+            discoverPeersUseCase.isDiscovering.collect { isDiscovering ->
+                _uiState.value = _uiState.value.copy(isScanning = isDiscovering)
+            }
+        }
+    }
+
+    private fun observeDiscoveryStatus() {
+        viewModelScope.launch {
+            discoverPeersUseCase.discoveryStatus.collect { status ->
+                _uiState.value = when (status) {
+                    is DiscoveryStatus.BluetoothDisabled -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            isBluetoothDisabled = true,
+                            isScanning = false
+                        )
+                    }
+                    is DiscoveryStatus.BluetoothUnavailable -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            isBluetoothUnavailable = true,
+                            isScanning = false
+                        )
+                    }
+                    is DiscoveryStatus.PermissionRequired -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            missingPermissions = status.permissions,
+                            showPermissionRationale = true,
+                            isScanning = false
+                        )
+                    }
+                    is DiscoveryStatus.PermissionPermanentlyDenied -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            isPermissionPermanentlyDenied = true,
+                            showPermissionRationale = true,
+                            isScanning = false
+                        )
+                    }
+                    is DiscoveryStatus.DiscoveryFailed -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            errorMessage = status.reason,
+                            isScanning = false
+                        )
+                    }
+                    is DiscoveryStatus.DiscoveryCancelled -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            isScanning = false
+                        )
+                    }
+                    is DiscoveryStatus.DiscoveryComplete -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            isScanning = false
+                        )
+                    }
+                    is DiscoveryStatus.Discovering -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            isScanning = true,
+                            isBluetoothDisabled = false
+                        )
+                    }
+                    is DiscoveryStatus.PermissionRevoked -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            missingPermissions = permissionHelper.getMissingPermissions(),
+                            showPermissionRationale = true,
+                            isScanning = false
+                        )
+                    }
+                    is DiscoveryStatus.PermissionDenied -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            showPermissionRationale = true,
+                            isScanning = false
+                        )
+                    }
+                    is DiscoveryStatus.PermissionGranted -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            showPermissionRationale = false,
+                            missingPermissions = emptyList()
+                        )
+                    }
+                    is DiscoveryStatus.ReadyForDiscovery -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            isBluetoothDisabled = false
+                        )
+                    }
+                    else -> {
+                        _uiState.value.copy(discoveryStatus = status)
+                    }
+                }
+            }
+        }
+    }
+
+    fun startScan() {
+        if (!permissionHelper.isBluetoothSupported()) {
+            _uiState.value = _uiState.value.copy(isBluetoothUnavailable = true)
+            return
+        }
+
+        if (!permissionHelper.isBluetoothEnabled()) {
+            _uiState.value = _uiState.value.copy(isBluetoothDisabled = true)
+            return
+        }
+
+        if (!permissionHelper.hasRequiredPermissions()) {
+            val missing = permissionHelper.getMissingPermissions()
+            _uiState.value = _uiState.value.copy(
+                missingPermissions = missing,
+                showPermissionRationale = true
+            )
+            return
+        }
+
+        viewModelScope.launch {
+            val result = discoverPeersUseCase.startDiscovery(localDisplayName, localDeviceId)
+            if (result.isFailure) {
+                _uiState.value = _uiState.value.copy(
+                    errorMessage = result.exceptionOrNull()?.message ?: "Failed to start discovery"
+                )
+            }
+        }
+    }
+
+    fun stopScan() {
+        viewModelScope.launch {
+            discoverPeersUseCase.stopDiscovery()
+            _uiState.value = _uiState.value.copy(isScanning = false)
+        }
+    }
+
+    fun onBluetoothEnabled() {
+        _uiState.value = _uiState.value.copy(isBluetoothDisabled = false)
+        startScan()
+    }
+
+    fun onPermissionsGranted() {
+        _uiState.value = _uiState.value.copy(
+            showPermissionRationale = false,
+            missingPermissions = emptyList(),
+            isPermissionPermanentlyDenied = false
+        )
+        startScan()
+    }
+
+    fun onPermissionsDenied(permanentlyDenied: Boolean) {
+        _uiState.value = _uiState.value.copy(
+            showPermissionRationale = true,
+            isPermissionPermanentlyDenied = permanentlyDenied,
+            isScanning = false
+        )
+    }
+
+    fun dismissPermissionRationale() {
+        _uiState.value = _uiState.value.copy(showPermissionRationale = false)
+    }
+
+    fun dismissBluetoothDisabled() {
+        _uiState.value = _uiState.value.copy(isBluetoothDisabled = false)
+    }
+
+    fun onPeerClicked(peer: Peer) {
+        if (!peer.isTrusted) {
+            _uiState.value = _uiState.value.copy(pendingTrustPeer = peer)
+        } else {
+            connectToPeer(peer)
+        }
+    }
+
+    fun confirmTrust(peer: Peer) {
+        viewModelScope.launch {
+            discoverPeersUseCase.trustPeer(peer)
+            _uiState.value = _uiState.value.copy(pendingTrustPeer = null)
+            connectToPeer(peer)
+        }
+    }
+
+    fun dismissTrustDialog() {
+        _uiState.value = _uiState.value.copy(pendingTrustPeer = null)
+    }
+
+    private fun connectToPeer(peer: Peer) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(connectingPeerId = peer.deviceId)
+            val result = connectPeerUseCase(peer)
+
+            _uiState.value = _uiState.value.copy(connectingPeerId = null)
+
+            if (result.isSuccess) {
+                val conversation = result.getOrThrow()
+                // Start Foreground Service to maintain persistent active link
+                ConnectionForegroundService.startService(context, peer.displayName)
+
+                _navEvents.emit(
+                    DiscoveryNavigationEvent.OpenChat(
+                        conversationId = conversation.id,
+                        peerId = peer.deviceId,
+                        peerDisplayName = peer.displayName
+                    )
+                )
+            } else {
+                _uiState.value = _uiState.value.copy(
+                    errorMessage = result.exceptionOrNull()?.message ?: "Failed to connect to peer"
+                )
+            }
+        }
+    }
+
+    fun dismissError() {
+        _uiState.value = _uiState.value.copy(errorMessage = null)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        viewModelScope.launch {
+            discoverPeersUseCase.stopDiscovery()
+        }
+    }
+}
