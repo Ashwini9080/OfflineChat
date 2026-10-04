@@ -27,4 +27,21 @@ class DatabaseMigrationTest {
             db.execSQL("CREATE INDEX IF NOT EXISTS index_conversations_last_activity_at ON conversations(last_activity_at)")
         }
     }
+
+    @Test
+    fun `migration from version 2 to 3 adds security columns to peers table`() {
+        val db = mockk<SupportSQLiteDatabase>(relaxed = true)
+
+        DatabaseModule.MIGRATION_2_3.migrate(db)
+
+        verify {
+            db.execSQL("ALTER TABLE peers ADD COLUMN trust_state TEXT NOT NULL DEFAULT 'UNKNOWN'")
+        }
+        verify {
+            db.execSQL("ALTER TABLE peers ADD COLUMN safety_number TEXT DEFAULT NULL")
+        }
+        verify {
+            db.execSQL("ALTER TABLE peers ADD COLUMN identity_fingerprint TEXT DEFAULT NULL")
+        }
+    }
 }

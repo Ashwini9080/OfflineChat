@@ -1,11 +1,14 @@
 package com.offlinechat.domain.usecase
 
+import com.offlinechat.data.transport.MessageSyncEngine
 import com.offlinechat.data.transport.MessageTransport
+import com.offlinechat.domain.model.EncryptedMessagePayload
 import com.offlinechat.domain.model.Message
-import com.offlinechat.domain.model.MessageEnvelope
 import com.offlinechat.domain.model.MessageStatus
+import com.offlinechat.domain.model.PeerTrustState
 import com.offlinechat.domain.repository.ConversationRepository
 import com.offlinechat.domain.repository.MessageRepository
+import com.offlinechat.security.MessageSecurity
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -15,13 +18,15 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.Base64
 
 class SendMessageUseCaseTest {
 
     private lateinit var messageRepository: MessageRepository
     private lateinit var conversationRepository: ConversationRepository
     private lateinit var transport: MessageTransport
-    private lateinit var syncEngine: com.offlinechat.data.transport.MessageSyncEngine
+    private lateinit var syncEngine: MessageSyncEngine
+    private lateinit var messageSecurity: MessageSecurity
     private lateinit var useCase: SendMessageUseCase
 
     @Before
@@ -30,12 +35,25 @@ class SendMessageUseCaseTest {
         conversationRepository = mockk(relaxed = true)
         transport = mockk(relaxed = true)
         syncEngine = mockk(relaxed = true)
+        messageSecurity = mockk(relaxed = true)
+
+        coEvery { messageSecurity.getPeerTrustState(any()) } returns PeerTrustState.VERIFIED
+        coEvery { messageSecurity.encryptMessage(any(), any(), any()) } answers {
+            EncryptedMessagePayload(
+                sessionId = "test-session-123",
+                nonceBase64 = Base64.getEncoder().encodeToString(ByteArray(12) { 1 }),
+                ciphertextBase64 = Base64.getEncoder().encodeToString("encrypted-bytes".toByteArray()),
+                signatureBase64 = Base64.getEncoder().encodeToString(ByteArray(64) { 2 }),
+                senderFingerprint = "fingerprint-abc"
+            )
+        }
 
         useCase = SendMessageUseCase(
             messageRepository = messageRepository,
             conversationRepository = conversationRepository,
             transport = transport,
-            syncEngine = syncEngine
+            syncEngine = syncEngine,
+            messageSecurity = messageSecurity
         )
     }
 
@@ -47,7 +65,19 @@ class SendMessageUseCaseTest {
     }
 
     @Test
-    fun `invoke with valid text successfully sends and saves message`() = runTest {
+    fun `invoke with REVOKED peer trust state blocks transmission before network or disk write`() = runTest {
+        coEvery { messageSecurity.getPeerTrustState("user-b") } returns PeerTrustState.REVOKED
+
+        val result = useCase("convo-1", "user-a", "user-b", "Hello offline peer!")
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is SecurityException)
+
+        coVerify(exactly = 0) { messageRepository.saveMessage(any()) }
+        coVerify(exactly = 0) { transport.sendEnvelope(any()) }
+    }
+
+    @Test
+    fun `invoke with valid text successfully encrypts, sends and saves message`() = runTest {
         coEvery { transport.sendEnvelope(any()) } returns Result.success(Unit)
 
         val result = useCase("convo-1", "user-a", "user-b", "Hello offline peer!")
@@ -61,6 +91,8 @@ class SendMessageUseCaseTest {
         coVerify { messageRepository.saveMessage(match { it.text == "Hello offline peer!" }) }
         // Verify conversation update
         coVerify { conversationRepository.updateLastMessage("convo-1", "Hello offline peer!", any()) }
+        // Verify transport sent encrypted envelope
+        coVerify { transport.sendEnvelope(match { it.messageId == sentMessage.id }) }
         // Verify status update to SENT
         coVerify { messageRepository.updateMessageStatus(sentMessage.id, MessageStatus.SENT) }
     }

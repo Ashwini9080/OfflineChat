@@ -3,6 +3,7 @@ package com.offlinechat.data.repository
 import com.offlinechat.data.local.database.PeerDao
 import com.offlinechat.data.local.database.PeerEntity
 import com.offlinechat.domain.model.Peer
+import com.offlinechat.domain.model.PeerTrustState
 import com.offlinechat.domain.model.TransportType
 import com.offlinechat.domain.repository.PeerRepository
 import kotlinx.coroutines.flow.Flow
@@ -46,13 +47,25 @@ class PeerRepositoryImpl @Inject constructor(
             rssi = peer.rssi,
             isTrusted = peer.isTrusted,
             transportType = peer.transportType.name,
-            lastSeenAt = peer.lastSeenAt
+            lastSeenAt = peer.lastSeenAt,
+            trustState = peer.trustState.name,
+            safetyNumber = peer.safetyNumber,
+            identityFingerprint = peer.identityFingerprint
         )
         peerDao.upsertPeer(entity)
     }
 
     override suspend fun markPeerTrusted(deviceId: String, isTrusted: Boolean) {
         peerDao.updateTrustStatus(deviceId, isTrusted)
+    }
+
+    override suspend fun updateTrustState(deviceId: String, trustState: PeerTrustState, safetyNumber: String?) {
+        peerDao.updateTrustState(deviceId, trustState.name, safetyNumber)
+        if (trustState == PeerTrustState.VERIFIED) {
+            peerDao.updateTrustStatus(deviceId, true)
+        } else if (trustState == PeerTrustState.REVOKED) {
+            peerDao.updateTrustStatus(deviceId, false)
+        }
     }
 
     override suspend fun deletePeer(deviceId: String) {
@@ -66,6 +79,10 @@ class PeerRepositoryImpl @Inject constructor(
             ByteArray(0)
         }
 
+        val domainTrustState = runCatching {
+            PeerTrustState.valueOf(trustState)
+        }.getOrDefault(if (isTrusted) PeerTrustState.VERIFIED else PeerTrustState.UNKNOWN)
+
         return Peer(
             deviceId = deviceId,
             displayName = displayName,
@@ -75,7 +92,10 @@ class PeerRepositoryImpl @Inject constructor(
             isTrusted = isTrusted,
             isConnected = false,
             transportType = runCatching { TransportType.valueOf(transportType) }.getOrDefault(TransportType.BLUETOOTH),
-            lastSeenAt = lastSeenAt
+            lastSeenAt = lastSeenAt,
+            trustState = domainTrustState,
+            safetyNumber = safetyNumber,
+            identityFingerprint = identityFingerprint
         )
     }
 }

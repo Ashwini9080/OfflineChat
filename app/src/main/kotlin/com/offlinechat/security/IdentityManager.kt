@@ -23,6 +23,10 @@ class IdentityManager @Inject constructor(
     val publicKeyBytes: ByteArray
         get() = keystoreManager.getPublicKey().encoded
 
+    val fingerprint: String by lazy {
+        computeFingerprint(publicKeyBytes)
+    }
+
     fun signPayload(payload: ByteArray): ByteArray {
         return keystoreManager.sign(payload)
     }
@@ -34,6 +38,18 @@ class IdentityManager @Inject constructor(
             keystoreManager.verify(pubKey, payload, signature)
         } catch (e: Exception) {
             false
+        }
+    }
+
+    companion object {
+        fun computeFingerprint(pubKeyBytes: ByteArray): String {
+            val digest = MessageDigest.getInstance("SHA-256").digest(pubKeyBytes)
+            return digest.joinToString(":") { "%02X".format(it) }
+        }
+
+        fun deriveDeviceId(pubKeyBytes: ByteArray): String {
+            val digest = MessageDigest.getInstance("SHA-256").digest(pubKeyBytes)
+            return digest.take(16).joinToString("") { "%02x".format(it) }
         }
     }
 }

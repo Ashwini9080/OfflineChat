@@ -2,28 +2,37 @@ package com.offlinechat.domain.usecase
 
 import com.offlinechat.data.transport.MessageSyncEngine
 import com.offlinechat.data.transport.MessageTransport
+import com.offlinechat.domain.model.EncryptedMessagePayload
 import com.offlinechat.domain.model.Message
 import com.offlinechat.domain.model.MessageEnvelope
 import com.offlinechat.domain.model.MessageStatus
+import com.offlinechat.domain.model.PeerTrustState
 import com.offlinechat.domain.repository.ConversationRepository
 import com.offlinechat.domain.repository.MessageRepository
+import com.offlinechat.security.MessageSecurity
+import kotlinx.serialization.json.Json
+import java.util.Base64
 import java.util.UUID
 import javax.inject.Inject
 
 /**
  * Domain use case responsible for the controlled outgoing message lifecycle:
- * 1. Persist locally as PENDING immediately.
- * 2. Transition state to SENDING as frame is handed to the transport.
- * 3. On successful transmission (socket flush), transition to SENT and launch ACK timeout watcher.
- * 4. On transport failure, transition to FAILED and allow controlled manual retry.
- * 5. Provides controlled retry reusing the exact messageId without creating duplicate entries.
+ * 1. Validates peer trust state (blocks transmission if REVOKED).
+ * 2. Persists locally as PENDING immediately for sender's view.
+ * 3. Encrypts plaintext using AES-256-GCM AEAD and signs with Android Keystore private key.
+ * 4. Places ONLY ciphertext, nonce, and signature into the transport envelope (zero plaintext over Bluetooth).
+ * 5. Transitions state to SENDING -> SENT upon socket flush and registers ACK timeout watcher.
+ * 6. Supports controlled retries reusing the original messageId.
  */
 class SendMessageUseCase @Inject constructor(
     private val messageRepository: MessageRepository,
     private val conversationRepository: ConversationRepository,
     private val transport: MessageTransport,
-    private val syncEngine: MessageSyncEngine
+    private val syncEngine: MessageSyncEngine,
+    private val messageSecurity: MessageSecurity
 ) {
+    private val json = Json { ignoreUnknownKeys = true }
+
     suspend operator fun invoke(
         conversationId: String,
         senderId: String,
@@ -33,6 +42,12 @@ class SendMessageUseCase @Inject constructor(
         val trimmed = text.trim()
         if (trimmed.isEmpty()) {
             return Result.failure(IllegalArgumentException("Message cannot be empty"))
+        }
+
+        // 1. Verify peer trust state
+        val peerTrust = messageSecurity.getPeerTrustState(receiverId)
+        if (peerTrust == PeerTrustState.REVOKED) {
+            return Result.failure(SecurityException("Transmission blocked: Peer cryptographic identity is REVOKED."))
         }
 
         val messageId = UUID.randomUUID().toString()
@@ -49,14 +64,35 @@ class SendMessageUseCase @Inject constructor(
             isOutbound = true
         )
 
-        // 1. Save locally with PENDING status
+        // 2. Save locally with PENDING status for local conversation history
         messageRepository.saveMessage(message)
         conversationRepository.updateLastMessage(conversationId, trimmed, now)
 
-        // 2. Transition to SENDING
+        // 3. Transition to SENDING
         messageRepository.updateMessageStatus(messageId, MessageStatus.SENDING)
 
-        // 3. Prepare envelope
+        // 4. Encrypt plaintext payload via MessageSecurity
+        val wirePayload: ByteArray
+        var nonceBytes: ByteArray? = null
+        var signatureBytes: ByteArray? = null
+
+        try {
+            val encryptedPayload = messageSecurity.encryptMessage(
+                plaintext = trimmed.toByteArray(Charsets.UTF_8),
+                recipientPeerId = receiverId,
+                messageId = messageId
+            )
+            val jsonPayload = json.encodeToString(EncryptedMessagePayload.serializer(), encryptedPayload)
+            wirePayload = jsonPayload.toByteArray(Charsets.UTF_8)
+            nonceBytes = Base64.getDecoder().decode(encryptedPayload.nonceBase64)
+            signatureBytes = Base64.getDecoder().decode(encryptedPayload.signatureBase64)
+        } catch (e: Exception) {
+            // If secure session is not available, fail securely
+            messageRepository.updateMessageStatus(messageId, MessageStatus.FAILED)
+            return Result.failure(SecurityException("Encryption failed: ${e.message}", e))
+        }
+
+        // 5. Prepare transport envelope carrying ONLY encrypted payload
         val envelope = MessageEnvelope(
             protocolVersion = 1,
             messageId = messageId,
@@ -65,10 +101,12 @@ class SendMessageUseCase @Inject constructor(
             receiverId = receiverId,
             timestamp = now,
             messageType = "TEXT",
-            payload = trimmed.toByteArray(Charsets.UTF_8)
+            payload = wirePayload,
+            nonce = nonceBytes,
+            signature = signatureBytes
         )
 
-        // 4. Transmit through transport
+        // 6. Transmit encrypted frame through transport
         val sendResult = transport.sendEnvelope(envelope)
 
         val updatedStatus = if (sendResult.isSuccess) {
@@ -77,11 +115,11 @@ class SendMessageUseCase @Inject constructor(
             MessageStatus.FAILED
         }
 
-        // 5. Update status in local database
+        // 7. Update status in local database
         messageRepository.updateMessageStatus(messageId, updatedStatus)
 
         return if (sendResult.isSuccess) {
-            // 6. Watch for delivery ACK with timeout
+            // 8. Watch for delivery ACK with timeout
             syncEngine.watchAckTimeout(messageId)
             Result.success(message.copy(status = MessageStatus.SENT))
         } else {
@@ -91,11 +129,36 @@ class SendMessageUseCase @Inject constructor(
 
     /**
      * Retries a failed outgoing message reusing the exact original messageId.
-     * Prevents database duplication and respects the state transition model.
+     * Re-encrypts with a fresh nonce to prevent IV reuse.
      */
     suspend fun retry(message: Message): Result<Message> {
+        val peerTrust = messageSecurity.getPeerTrustState(message.receiverId)
+        if (peerTrust == PeerTrustState.REVOKED) {
+            return Result.failure(SecurityException("Transmission blocked: Peer cryptographic identity is REVOKED."))
+        }
+
         // 1. Transition to SENDING
         messageRepository.updateMessageStatus(message.id, MessageStatus.SENDING)
+
+        // 2. Re-encrypt with fresh nonce
+        val wirePayload: ByteArray
+        var nonceBytes: ByteArray? = null
+        var signatureBytes: ByteArray? = null
+
+        try {
+            val encryptedPayload = messageSecurity.encryptMessage(
+                plaintext = message.text.toByteArray(Charsets.UTF_8),
+                recipientPeerId = message.receiverId,
+                messageId = message.id
+            )
+            val jsonPayload = json.encodeToString(EncryptedMessagePayload.serializer(), encryptedPayload)
+            wirePayload = jsonPayload.toByteArray(Charsets.UTF_8)
+            nonceBytes = Base64.getDecoder().decode(encryptedPayload.nonceBase64)
+            signatureBytes = Base64.getDecoder().decode(encryptedPayload.signatureBase64)
+        } catch (e: Exception) {
+            messageRepository.updateMessageStatus(message.id, MessageStatus.FAILED)
+            return Result.failure(SecurityException("Retry encryption failed: ${e.message}", e))
+        }
 
         val envelope = MessageEnvelope(
             protocolVersion = 1,
@@ -105,7 +168,9 @@ class SendMessageUseCase @Inject constructor(
             receiverId = message.receiverId,
             timestamp = message.timestamp,
             messageType = "TEXT",
-            payload = message.text.toByteArray(Charsets.UTF_8)
+            payload = wirePayload,
+            nonce = nonceBytes,
+            signature = signatureBytes
         )
 
         val sendResult = transport.sendEnvelope(envelope)

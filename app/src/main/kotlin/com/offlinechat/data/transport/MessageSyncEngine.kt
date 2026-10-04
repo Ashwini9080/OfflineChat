@@ -2,46 +2,50 @@ package com.offlinechat.data.transport
 
 import android.content.Context
 import android.util.Log
+import com.offlinechat.domain.model.EncryptedMessagePayload
 import com.offlinechat.domain.model.HandshakePayload
 import com.offlinechat.domain.model.MessageEnvelope
 import com.offlinechat.domain.model.MessageStatus
-import com.offlinechat.domain.model.Peer
+import com.offlinechat.domain.model.PeerTrustState
 import com.offlinechat.domain.model.TransportType
 import com.offlinechat.domain.repository.ConversationRepository
 import com.offlinechat.domain.repository.MessageRepository
 import com.offlinechat.domain.repository.PeerRepository
+import com.offlinechat.domain.repository.PreferencesRepository
 import com.offlinechat.domain.usecase.ReceiveMessageUseCase
 import com.offlinechat.security.IdentityManager
+import com.offlinechat.security.MessageSecurity
 import com.offlinechat.service.ConnectionForegroundService
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
-import java.util.UUID
-import javax.inject.Inject
-import javax.inject.Singleton
-
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import java.util.Base64
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
  * Centralized, application-scoped message synchronization and delivery engine.
  *
  * Responsibilities:
- * 1. Collects incoming envelopes from the active transport regardless of which UI screen is open.
- * 2. Validates, deduplicates, and saves incoming chat messages to Room SQLite database via [ReceiveMessageUseCase].
- * 3. Triggers bidirectional DELIVERY_ACK delivery receipts upon message receipt.
- * 4. Handles incoming ACK receipts to transition outbound messages from SENT -> DELIVERED.
- * 5. Enforces a 15-second delivery ACK timeout transitioning unacknowledged SENT messages to FAILED.
- * 6. Tracks active UI conversation to accurately increment unread counts when user is not viewing the chat.
- * 7. Handles mutual handshakes to link peer identities and start foreground services.
- * 8. Flushes pending offline message queues automatically when a peer reconnects.
+ * 1. Collects incoming envelopes from active transports.
+ * 2. Authenticates peer handshakes, detects key replacement attacks, and establishes ECDH session keys.
+ * 3. Validates, authenticates, and decrypts incoming messages via [ReceiveMessageUseCase].
+ * 4. Triggers bidirectional DELIVERY_ACK delivery receipts upon message receipt.
+ * 5. Handles incoming ACK receipts to transition outbound messages from SENT -> DELIVERED.
+ * 6. Enforces a 15-second delivery ACK timeout transitioning unacknowledged SENT messages to FAILED.
+ * 7. Tracks active UI conversation to accurately increment unread counts when user is not viewing the chat.
+ * 8. Flushes pending offline message queues using AES-256-GCM AEAD encryption when peers connect.
  */
 @Singleton
 class MessageSyncEngine @Inject constructor(
@@ -51,7 +55,9 @@ class MessageSyncEngine @Inject constructor(
     private val messageRepository: MessageRepository,
     private val conversationRepository: ConversationRepository,
     private val peerRepository: PeerRepository,
-    private val identityManager: IdentityManager
+    private val identityManager: IdentityManager,
+    private val messageSecurity: MessageSecurity,
+    private val preferencesRepository: PreferencesRepository
 ) {
     companion object {
         private const val TAG = "MessageSyncEngine"
@@ -67,6 +73,9 @@ class MessageSyncEngine @Inject constructor(
 
     // Map of messageId -> Job for ACK timeout detection
     private val ackTimeouts = ConcurrentHashMap<String, Job>()
+
+    // Track peers to which we have sent our handshake in this session to prevent echo loops
+    private val handshakesSent = ConcurrentHashMap.newKeySet<String>()
 
     fun setActiveConversation(conversationId: String?) {
         _activeConversationId.value = conversationId
@@ -109,35 +118,62 @@ class MessageSyncEngine @Inject constructor(
         }
     }
 
+    suspend fun sendHandshake(peerId: String) {
+        try {
+            val localName = runCatching { preferencesRepository.displayName.first() }.getOrNull()?.ifBlank { "Offline Peer" } ?: "Offline Peer"
+            val payload = messageSecurity.createHandshakePayload(localName)
+            val jsonString = json.encodeToString(HandshakePayload.serializer(), payload)
+
+            val envelope = MessageEnvelope(
+                protocolVersion = 1,
+                messageId = UUID.randomUUID().toString(),
+                conversationId = peerId,
+                senderId = identityManager.deviceId,
+                receiverId = peerId,
+                timestamp = System.currentTimeMillis(),
+                messageType = "HANDSHAKE",
+                payload = jsonString.toByteArray(Charsets.UTF_8)
+            )
+            transport.sendEnvelope(envelope)
+            handshakesSent.add(peerId)
+            Log.d(TAG, "Sent authenticated handshake to peer: $peerId")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send handshake to $peerId", e)
+        }
+    }
+
     private suspend fun handleHandshake(envelope: MessageEnvelope) {
         try {
             val payload = json.decodeFromString(HandshakePayload.serializer(), String(envelope.payload, Charsets.UTF_8))
             Log.d(TAG, "SyncEngine processing handshake for: ${payload.displayName} [${payload.deviceId}]")
 
-            // 1. Save or update peer
-            val peer = Peer(
-                deviceId = payload.deviceId,
-                displayName = payload.displayName,
-                bluetoothAddress = null,
-                transportType = TransportType.BLUETOOTH,
-                isConnected = true,
-                isTrusted = true,
-                lastSeenAt = System.currentTimeMillis()
-            )
-            peerRepository.saveOrUpdatePeer(peer)
+            // 1. Process authenticated handshake & key agreement via MessageSecurity
+            val handshakeResult = messageSecurity.processHandshake(payload)
 
-            // 2. Ensure direct conversation exists
+            if (handshakeResult.isIdentityChanged) {
+                Log.w(TAG, "SECURITY ALERT: Peer identity changed for ${payload.deviceId}! Message queue flush aborted.")
+                return
+            }
+
+            // 2. Send mutual handshake if not yet sent in this session
+            if (!handshakesSent.contains(payload.deviceId)) {
+                sendHandshake(payload.deviceId)
+            }
+
+            // 3. Ensure direct conversation exists
             conversationRepository.getOrCreateConversation(
                 peerId = payload.deviceId,
                 peerDisplayName = payload.displayName,
                 transportType = TransportType.BLUETOOTH
             )
 
-            // 3. Keep connection foreground service running with peer name
+            // 4. Keep connection foreground service running with peer name
             ConnectionForegroundService.startService(context, payload.displayName)
 
-            // 4. Flush any queued offline messages for this newly connected peer
-            flushPendingMessages(payload.deviceId)
+            // 5. Flush any queued offline messages for this newly connected peer (only if not revoked)
+            if (handshakeResult.trustState != PeerTrustState.REVOKED) {
+                flushPendingMessages(payload.deviceId)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error handling handshake", e)
         }
@@ -145,7 +181,7 @@ class MessageSyncEngine @Inject constructor(
 
     private suspend fun handleTextMessage(envelope: MessageEnvelope) {
         try {
-            // Validate, deduplicate, and store message in Room database
+            // Validate, authenticate, decrypt, and store message in Room database
             val result = receiveMessageUseCase(envelope)
             if (result.isFailure) {
                 Log.w(TAG, "Failed to process incoming text message: ${result.exceptionOrNull()?.message}")
@@ -154,7 +190,7 @@ class MessageSyncEngine @Inject constructor(
 
             val savedMessage = result.getOrNull()
             if (savedMessage != null) {
-                Log.i(TAG, "Saved incoming message [${savedMessage.id}] from ${savedMessage.senderId}")
+                Log.i(TAG, "Saved authenticated incoming message [${savedMessage.id}] from ${savedMessage.senderId}")
 
                 // Update unread count if user is not currently viewing this conversation
                 val targetConversationId = savedMessage.conversationId
@@ -210,6 +246,12 @@ class MessageSyncEngine @Inject constructor(
     }
 
     suspend fun flushPendingMessages(peerId: String) {
+        val trustState = messageSecurity.getPeerTrustState(peerId)
+        if (trustState == PeerTrustState.REVOKED) {
+            Log.w(TAG, "Cannot flush pending messages: Peer $peerId identity is REVOKED")
+            return
+        }
+
         val pending = messageRepository.getPendingOutboundMessagesForPeer(peerId)
         if (pending.isEmpty()) return
 
@@ -218,26 +260,42 @@ class MessageSyncEngine @Inject constructor(
             // 1. Transition to SENDING
             messageRepository.updateMessageStatus(msg.id, MessageStatus.SENDING)
 
-            val envelope = MessageEnvelope(
-                protocolVersion = 1,
-                messageId = msg.id,
-                conversationId = msg.conversationId,
-                senderId = msg.senderId,
-                receiverId = msg.receiverId,
-                timestamp = msg.timestamp,
-                messageType = "TEXT",
-                payload = msg.text.toByteArray(Charsets.UTF_8)
-            )
-            val result = transport.sendEnvelope(envelope)
-            if (result.isSuccess) {
-                // 2. Transition to SENT and register ACK timeout watcher
-                messageRepository.updateMessageStatus(msg.id, MessageStatus.SENT)
-                watchAckTimeout(msg.id)
-                Log.d(TAG, "Successfully flushed message [${msg.id}] to $peerId (SENT, awaiting ACK)")
-            } else {
-                // 3. Mark FAILED on network/socket write failure
+            try {
+                // 2. Encrypt plaintext
+                val encrypted = messageSecurity.encryptMessage(
+                    plaintext = msg.text.toByteArray(Charsets.UTF_8),
+                    recipientPeerId = peerId,
+                    messageId = msg.id
+                )
+                val jsonPayload = json.encodeToString(EncryptedMessagePayload.serializer(), encrypted)
+
+                val envelope = MessageEnvelope(
+                    protocolVersion = 1,
+                    messageId = msg.id,
+                    conversationId = msg.conversationId,
+                    senderId = msg.senderId,
+                    receiverId = msg.receiverId,
+                    timestamp = msg.timestamp,
+                    messageType = "TEXT",
+                    payload = jsonPayload.toByteArray(Charsets.UTF_8),
+                    nonce = Base64.getDecoder().decode(encrypted.nonceBase64),
+                    signature = Base64.getDecoder().decode(encrypted.signatureBase64)
+                )
+
+                val result = transport.sendEnvelope(envelope)
+                if (result.isSuccess) {
+                    // 3. Transition to SENT and register ACK timeout watcher
+                    messageRepository.updateMessageStatus(msg.id, MessageStatus.SENT)
+                    watchAckTimeout(msg.id)
+                    Log.d(TAG, "Successfully flushed message [${msg.id}] to $peerId (SENT, awaiting ACK)")
+                } else {
+                    messageRepository.updateMessageStatus(msg.id, MessageStatus.FAILED)
+                    Log.w(TAG, "Failed to flush pending message [${msg.id}]", result.exceptionOrNull())
+                    break
+                }
+            } catch (e: Exception) {
                 messageRepository.updateMessageStatus(msg.id, MessageStatus.FAILED)
-                Log.w(TAG, "Failed to flush pending message [${msg.id}]", result.exceptionOrNull())
+                Log.e(TAG, "Failed to encrypt/flush pending message [${msg.id}]", e)
                 break
             }
         }

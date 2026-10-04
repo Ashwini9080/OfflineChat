@@ -3,15 +3,18 @@ package com.offlinechat.presentation.chat
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.offlinechat.data.transport.MessageSyncEngine
 import com.offlinechat.data.transport.MessageTransport
 import com.offlinechat.domain.model.Message
 import com.offlinechat.domain.model.PeerConnectionState
+import com.offlinechat.domain.model.PeerTrustState
 import com.offlinechat.domain.repository.MessageRepository
 import com.offlinechat.domain.repository.PeerRepository
 import com.offlinechat.domain.usecase.ConnectPeerUseCase
 import com.offlinechat.domain.usecase.GetLocalDeviceIdentityUseCase
 import com.offlinechat.domain.usecase.GetMessagesUseCase
 import com.offlinechat.domain.usecase.SendMessageUseCase
+import com.offlinechat.security.MessageSecurity
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,10 +32,12 @@ data class ChatUiState(
     val isSending: Boolean = false,
     val connectionState: PeerConnectionState = PeerConnectionState.Disconnected,
     val isReconnecting: Boolean = false,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val trustState: PeerTrustState = PeerTrustState.UNKNOWN,
+    val safetyNumber: String? = null,
+    val identityFingerprint: String? = null,
+    val isVerificationDialogOpen: Boolean = false
 )
-
-import com.offlinechat.data.transport.MessageSyncEngine
 
 @HiltViewModel
 class ChatViewModel @Inject constructor(
@@ -44,7 +49,8 @@ class ChatViewModel @Inject constructor(
     private val messageRepository: MessageRepository,
     private val peerRepository: PeerRepository,
     private val messageTransport: MessageTransport,
-    private val messageSyncEngine: MessageSyncEngine
+    private val messageSyncEngine: MessageSyncEngine,
+    private val messageSecurity: MessageSecurity
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ChatUiState())
@@ -65,6 +71,7 @@ class ChatViewModel @Inject constructor(
         observeLocalIdentity()
         observeMessages(convoId)
         observeConnectionState(pId)
+        observePeerSecurity(pId)
         markRead(convoId)
     }
 
@@ -97,6 +104,23 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    private fun observePeerSecurity(pId: String) {
+        if (pId.isBlank()) return
+        viewModelScope.launch {
+            peerRepository.getPeers().collect { peers ->
+                val peer = peers.find { it.deviceId == pId }
+                if (peer != null) {
+                    val activeSas = messageSecurity.getSafetyNumber(pId) ?: peer.safetyNumber
+                    _uiState.value = _uiState.value.copy(
+                        trustState = peer.trustState,
+                        safetyNumber = activeSas,
+                        identityFingerprint = peer.identityFingerprint
+                    )
+                }
+            }
+        }
+    }
+
     private fun markRead(convoId: String) {
         viewModelScope.launch {
             getMessagesUseCase.markAsRead(convoId)
@@ -105,6 +129,38 @@ class ChatViewModel @Inject constructor(
 
     fun onInputTextChanged(text: String) {
         _uiState.value = _uiState.value.copy(inputText = text)
+    }
+
+    fun openVerificationDialog() {
+        _uiState.value = _uiState.value.copy(isVerificationDialogOpen = true)
+    }
+
+    fun closeVerificationDialog() {
+        _uiState.value = _uiState.value.copy(isVerificationDialogOpen = false)
+    }
+
+    fun verifyPeer() {
+        val pId = _uiState.value.peerId
+        if (pId.isBlank()) return
+        viewModelScope.launch {
+            messageSecurity.verifyPeer(pId)
+            _uiState.value = _uiState.value.copy(
+                trustState = PeerTrustState.VERIFIED,
+                isVerificationDialogOpen = false
+            )
+        }
+    }
+
+    fun revokePeer() {
+        val pId = _uiState.value.peerId
+        if (pId.isBlank()) return
+        viewModelScope.launch {
+            messageSecurity.revokePeer(pId)
+            _uiState.value = _uiState.value.copy(
+                trustState = PeerTrustState.REVOKED,
+                isVerificationDialogOpen = false
+            )
+        }
     }
 
     fun reconnect() {
@@ -133,6 +189,13 @@ class ChatViewModel @Inject constructor(
         val state = _uiState.value
         val text = state.inputText.trim()
         if (text.isEmpty() || state.isSending) return
+
+        if (state.trustState == PeerTrustState.REVOKED) {
+            _uiState.value = _uiState.value.copy(
+                errorMessage = "Cannot send: Peer cryptographic identity is REVOKED. Review security to continue."
+            )
+            return
+        }
 
         _uiState.value = _uiState.value.copy(inputText = "", isSending = true)
 

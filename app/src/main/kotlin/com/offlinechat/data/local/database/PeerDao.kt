@@ -27,6 +27,9 @@ interface PeerDao {
     @Query("UPDATE peers SET is_trusted = :isTrusted WHERE device_id = :deviceId")
     suspend fun updateTrustStatus(deviceId: String, isTrusted: Boolean)
 
+    @Query("UPDATE peers SET trust_state = :trustState, safety_number = :safetyNumber WHERE device_id = :deviceId")
+    suspend fun updateTrustState(deviceId: String, trustState: String, safetyNumber: String?)
+
     @Query("DELETE FROM peers WHERE device_id = :deviceId")
     suspend fun deletePeer(deviceId: String)
 }

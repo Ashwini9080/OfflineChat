@@ -28,6 +28,9 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -40,6 +43,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -51,12 +55,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.offlinechat.domain.model.PeerConnectionState
+import com.offlinechat.domain.model.PeerTrustState
 import com.offlinechat.presentation.components.MessageBubble
 import com.offlinechat.presentation.theme.AccentCyan
 import com.offlinechat.presentation.theme.AccentEmerald
@@ -239,28 +245,132 @@ fun ChatScreen(
                 .padding(padding)
         ) {
             // End-to-end security banner
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF0C1322))
-                    .border(1.dp, BorderSubtle.copy(alpha = 0.4f))
-                    .padding(horizontal = 14.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Lock,
-                    contentDescription = null,
-                    tint = AccentEmerald,
-                    modifier = Modifier.size(11.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = "End-to-End Encrypted via Hardware Keystore & AES-GCM",
-                    color = TextSecondary,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontSize = 10.sp
-                )
+            // Dynamic Security & Trust State Banner
+            when (state.trustState) {
+                PeerTrustState.VERIFIED -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF06281E))
+                            .border(1.dp, AccentEmerald.copy(alpha = 0.3f))
+                            .clickable { viewModel.openVerificationDialog() }
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Shield,
+                            contentDescription = null,
+                            tint = AccentEmerald,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "🔐 End-to-end encrypted · Identity verified ✓",
+                            color = AccentEmerald,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                PeerTrustState.REVOKED -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF3B151E))
+                            .border(1.dp, AccentRose.copy(alpha = 0.6f))
+                            .clickable { viewModel.openVerificationDialog() }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = "⚠",
+                                color = AccentRose,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Security Warning: Device identity changed",
+                                    color = AccentRose,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Messages are blocked until you verify this peer.",
+                                    color = Color(0xFFFECDD3),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(AccentRose)
+                                .clickable { viewModel.openVerificationDialog() }
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "Review",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+                else -> {
+                    // UNKNOWN, CONNECTED, VERIFICATION_REQUIRED
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF261D0C))
+                            .border(1.dp, Color(0xFFF59E0B).copy(alpha = 0.4f))
+                            .clickable { viewModel.openVerificationDialog() }
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = null,
+                                tint = Color(0xFFF59E0B),
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Encrypted link · Verification recommended",
+                                color = Color(0xFFFDE68A),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0xFFF59E0B))
+                                .clickable { viewModel.openVerificationDialog() }
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = "Verify Device",
+                                color = Color.Black,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                }
             }
 
             if (state.messages.isEmpty()) {
@@ -420,14 +530,21 @@ fun ChatScreen(
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    val isRevoked = state.trustState == PeerTrustState.REVOKED
+                    val canSend = isConnected && !isRevoked && state.inputText.isNotBlank() && !state.isSending
+
                     OutlinedTextField(
-                        value = if (isConnected) state.inputText else "",
-                        onValueChange = { if (isConnected) viewModel.onInputTextChanged(it) },
-                        enabled = isConnected,
+                        value = if (isConnected && !isRevoked) state.inputText else "",
+                        onValueChange = { if (isConnected && !isRevoked) viewModel.onInputTextChanged(it) },
+                        enabled = isConnected && !isRevoked,
                         placeholder = {
                             Text(
-                                text = if (isConnected) "Type a message..." else "Message input disabled",
-                                color = TextMuted,
+                                text = when {
+                                    !isConnected -> "Message input disabled"
+                                    isRevoked -> "Identity revoked · Verification required"
+                                    else -> "Type a message..."
+                                },
+                                color = if (isRevoked) AccentRose.copy(alpha = 0.8f) else TextMuted,
                                 style = MaterialTheme.typography.bodyMedium
                             )
                         },
@@ -451,8 +568,6 @@ fun ChatScreen(
                     )
 
                     Spacer(modifier = Modifier.width(8.dp))
-
-                    val canSend = isConnected && state.inputText.isNotBlank() && !state.isSending
 
                     Box(
                         modifier = Modifier
@@ -485,4 +600,164 @@ fun ChatScreen(
             }
         }
     }
+
+    if (state.isVerificationDialogOpen) {
+        SecurityVerificationDialog(
+            peerDisplayName = state.peerDisplayName,
+            trustState = state.trustState,
+            safetyNumber = state.safetyNumber,
+            fingerprint = state.identityFingerprint,
+            onVerify = { viewModel.verifyPeer() },
+            onRevoke = { viewModel.revokePeer() },
+            onDismiss = { viewModel.closeVerificationDialog() }
+        )
+    }
+}
+
+@Composable
+fun SecurityVerificationDialog(
+    peerDisplayName: String,
+    trustState: PeerTrustState,
+    safetyNumber: String?,
+    fingerprint: String?,
+    onVerify: () -> Unit,
+    onRevoke: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = BgCardDark,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Shield,
+                    contentDescription = null,
+                    tint = if (trustState == PeerTrustState.REVOKED) AccentRose else AccentEmerald,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Peer Security & Identity",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+            }
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = peerDisplayName,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary
+                )
+                Text(
+                    text = "Status: ${trustState.name}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = when (trustState) {
+                        PeerTrustState.VERIFIED -> AccentEmerald
+                        PeerTrustState.REVOKED -> AccentRose
+                        else -> Color(0xFFF59E0B)
+                    },
+                    fontWeight = FontWeight.Bold
+                )
+
+                if (trustState == PeerTrustState.REVOKED) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF3B151E))
+                            .border(1.dp, AccentRose.copy(alpha = 0.6f))
+                            .padding(10.dp)
+                    ) {
+                        Text(
+                            text = "⚠ Security Warning: The cryptographic identity of this device has changed from what was previously stored. Encrypted messaging is blocked until verified.",
+                            color = Color(0xFFFECDD3),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Verification code:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TextSecondary
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(BgInputDark)
+                        .border(1.dp, BorderSubtle, RoundedCornerShape(10.dp))
+                        .padding(vertical = 14.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = safetyNumber ?: "--- ---",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 4.sp,
+                        color = if (safetyNumber != null) AccentEmerald else TextMuted
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Compare this 6-digit code with $peerDisplayName's phone in person. If both match, this session is end-to-end encrypted and authenticated.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    fontSize = 11.sp
+                )
+
+                if (!fingerprint.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "Identity Fingerprint:",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                        fontSize = 10.sp
+                    )
+                    Text(
+                        text = fingerprint,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = TextMuted,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (trustState != PeerTrustState.VERIFIED) {
+                Button(
+                    onClick = onVerify,
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentEmerald)
+                ) {
+                    Text("Verify Device", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            } else {
+                Button(
+                    onClick = onRevoke,
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentRose)
+                ) {
+                    Text("Revoke Trust", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = TextSecondary)
+            }
+        }
+    )
 }

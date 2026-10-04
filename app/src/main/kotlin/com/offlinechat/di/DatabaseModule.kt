@@ -32,6 +32,14 @@ object DatabaseModule {
         }
     }
 
+    val MIGRATION_2_3 = object : Migration(2, 3) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE peers ADD COLUMN trust_state TEXT NOT NULL DEFAULT 'UNKNOWN'")
+            db.execSQL("ALTER TABLE peers ADD COLUMN safety_number TEXT DEFAULT NULL")
+            db.execSQL("ALTER TABLE peers ADD COLUMN identity_fingerprint TEXT DEFAULT NULL")
+        }
+    }
+
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase {
@@ -40,7 +48,7 @@ object DatabaseModule {
             AppDatabase::class.java,
             "offline_chat_clean.db"
         )
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .build()
     }
 

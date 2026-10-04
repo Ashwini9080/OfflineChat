@@ -1,20 +1,91 @@
 package com.offlinechat.security
 
+import com.offlinechat.domain.model.EncryptedMessagePayload
+import com.offlinechat.domain.model.HandshakePayload
+import com.offlinechat.domain.model.PeerTrustState
+
+data class HandshakeResult(
+    val peerId: String,
+    val peerDisplayName: String,
+    val trustState: PeerTrustState,
+    val safetyNumber: String,
+    val isIdentityChanged: Boolean
+)
+
 /**
- * Security abstraction decoupling application-level cryptography from transport layers.
+ * High-level security architecture abstraction decoupling application-level cryptography
+ * from the transport and presentation layers.
  *
- * Requirements:
- * 1. Key Management: Android Keystore hardware-backed keys, never exposed in plaintext.
- * 2. Authenticated Encryption: AES-256-GCM AEAD payload encryption & decryption.
- * 3. Digital Signatures: ECDSA P-256 signing and verification.
- * 4. Zero Secrets in Source: Never hard-code keys, never log keys or message content.
+ * Responsibilities:
+ * 1. Identity Management: Android Keystore hardware-backed EC P-256 identity keys.
+ * 2. Authenticated Key Agreement: Ephemeral ECDH key agreement with HKDF-SHA256 session derivation.
+ * 3. Peer Verification: Cryptographic Short Authentication String (SAS / Safety Number).
+ * 4. Authenticated Encryption: AES-256-GCM AEAD encryption/decryption with unique nonces and digital signatures.
+ * 5. Trust State & Identity Change Protection: Detecting key replacement and enforcing user verification.
  */
 interface MessageSecurity {
 
     /**
-     * Retrieves the local device's public key (X.509 encoded bytes) from Android Keystore.
+     * Returns the local device's public identity key in X.509 format.
      */
     fun getLocalPublicKey(): ByteArray
+
+    /**
+     * Returns the local device's SHA-256 cryptographic identity fingerprint.
+     */
+    fun getLocalDeviceFingerprint(): String
+
+    /**
+     * Creates an authenticated handshake payload containing the identity public key,
+     * an ephemeral key for forward secrecy, and an ECDSA signature over the payload.
+     */
+    fun createHandshakePayload(localDisplayName: String): HandshakePayload
+
+    /**
+     * Processes an incoming peer handshake payload:
+     * 1. Validates digital signature and device identity hash.
+     * 2. Detects unexpected identity key changes (key replacement attacks).
+     * 3. Executes ECDH key agreement to derive an AES-256-GCM session key and Safety Number.
+     * 4. Updates or persists peer record in Room.
+     */
+    suspend fun processHandshake(payload: HandshakePayload): HandshakeResult
+
+    /**
+     * Encrypts plaintext message into an [EncryptedMessagePayload] using AES-256-GCM with a fresh 12-byte nonce,
+     * bound with associated data and an ECDSA digital signature.
+     */
+    suspend fun encryptMessage(plaintext: ByteArray, recipientPeerId: String, messageId: String): EncryptedMessagePayload
+
+    /**
+     * Authenticates and decrypts an [EncryptedMessagePayload] using the established peer session key.
+     * Throws [SecurityException] if the signature or AEAD tag is invalid or tampered with.
+     */
+    suspend fun decryptMessage(encryptedPayload: EncryptedMessagePayload, senderPeerId: String, messageId: String): ByteArray
+
+    /**
+     * Returns the current cryptographic trust state for the given peer.
+     */
+    suspend fun getPeerTrustState(peerId: String): PeerTrustState
+
+    /**
+     * Marks a peer as explicitly VERIFIED by the user after out-of-band comparison of the Safety Number.
+     */
+    suspend fun verifyPeer(peerId: String)
+
+    /**
+     * Explicitly revokes trust for a peer, blocking encrypted communications.
+     */
+    suspend fun revokePeer(peerId: String)
+
+    /**
+     * Retrieves the active 6-digit verification code (Safety Number) for the peer session, or null if no session.
+     */
+    fun getSafetyNumber(peerId: String): String?
+
+    /**
+     * Returns true if an active authenticated session key exists for the peer.
+     */
+    fun hasEstablishedSession(peerId: String): Boolean
 
     /**
      * Cryptographically signs data using the non-exportable hardware-backed private key.
@@ -25,24 +96,4 @@ interface MessageSecurity {
      * Verifies digital signature against a peer's public key.
      */
     fun verify(peerPublicKeyBytes: ByteArray, data: ByteArray, signature: ByteArray): Boolean
-
-    /**
-     * Encrypts plaintext payload using AES-256-GCM with a 12-byte random nonce
-     * and 128-bit authentication tag.
-     *
-     * Output format: [12-byte Nonce] + [Ciphertext + Tag]
-     */
-    suspend fun encrypt(plaintext: ByteArray, recipientPeerId: String): ByteArray
-
-    /**
-     * Decrypts AES-256-GCM ciphertext payload after validating authentication tag.
-     *
-     * Input format: [12-byte Nonce] + [Ciphertext + Tag]
-     */
-    suspend fun decrypt(ciphertext: ByteArray, senderPeerId: String): ByteArray
-
-    /**
-     * Returns true if an authenticated key establishment has occurred for the given peer.
-     */
-    fun hasEstablishedSession(peerId: String): Boolean
 }

@@ -29,5 +29,14 @@ data class PeerEntity(
     val transportType: String,
 
     @ColumnInfo(name = "last_seen_at")
-    val lastSeenAt: Long
+    val lastSeenAt: Long,
+
+    @ColumnInfo(name = "trust_state")
+    val trustState: String = "UNKNOWN",
+
+    @ColumnInfo(name = "safety_number")
+    val safetyNumber: String? = null,
+
+    @ColumnInfo(name = "identity_fingerprint")
+    val identityFingerprint: String? = null
 )
