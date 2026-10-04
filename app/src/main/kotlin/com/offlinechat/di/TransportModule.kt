@@ -1,5 +1,7 @@
 package com.offlinechat.di
 
+import com.offlinechat.data.connection.BluetoothConnectionManager
+import com.offlinechat.domain.connection.ConnectionManager
 import com.offlinechat.data.discovery.DeviceDiscovery
 import com.offlinechat.data.discovery.DiscoveryManager
 import com.offlinechat.data.transport.MessageTransport
@@ -13,6 +15,12 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class TransportModule {
+
+    @Binds
+    @Singleton
+    abstract fun bindConnectionManager(
+        bluetoothConnectionManager: BluetoothConnectionManager
+    ): ConnectionManager
 
     @Binds
     @Singleton

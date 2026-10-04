@@ -488,10 +488,15 @@ fun DiscoveryScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(state.peers, key = { it.deviceId }) { peer ->
+                        val peerState = state.peerStates[peer.deviceId]
+                            ?: if (peer.isConnected) PeerConnectionState.Connected else PeerConnectionState.Idle
                         PeerItem(
                             peer = peer,
-                            isConnecting = state.connectingPeerId == peer.deviceId,
-                            onConnectClick = { viewModel.onPeerClicked(it) }
+                            connectionState = peerState,
+                            onConnectClick = { viewModel.onConnectClicked(it) },
+                            onCancelClick = { viewModel.onCancelConnectClicked(it) },
+                            onOpenChatClick = { viewModel.onOpenChatClicked(it) },
+                            onDisconnectClick = { viewModel.onDisconnectClicked(it) }
                         )
                     }
                 }

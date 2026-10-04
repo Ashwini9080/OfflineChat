@@ -155,16 +155,27 @@ fun ChatScreen(
                                 val statusColor = when (state.connectionState) {
                                     is PeerConnectionState.Connected -> StatusOnline
                                     is PeerConnectionState.Connecting, is PeerConnectionState.Authenticating -> Color(0xFFF59E0B)
-                                    is PeerConnectionState.Failed -> AccentRose
-                                    is PeerConnectionState.Disconnected -> TextMuted
+                                    is PeerConnectionState.Disconnecting -> Color(0xFFF59E0B)
+                                    is PeerConnectionState.ConnectionFailed, is PeerConnectionState.Failed,
+                                    is PeerConnectionState.ConnectionRejected, is PeerConnectionState.ConnectionTimeout,
+                                    is PeerConnectionState.ConnectionLost -> AccentRose
+                                    is PeerConnectionState.BluetoothDisabled, is PeerConnectionState.PermissionRevoked -> Color(0xFFF59E0B)
+                                    is PeerConnectionState.Idle, is PeerConnectionState.Disconnected -> TextMuted
                                 }
 
                                 val statusLabel = when (state.connectionState) {
-                                    is PeerConnectionState.Connected -> "Direct RFCOMM Active"
-                                    is PeerConnectionState.Connecting -> "Connecting link..."
+                                    is PeerConnectionState.Connected -> "Connected"
+                                    is PeerConnectionState.Connecting -> "Connecting..."
                                     is PeerConnectionState.Authenticating -> "Handshaking..."
+                                    is PeerConnectionState.Disconnecting -> "Disconnecting..."
+                                    is PeerConnectionState.ConnectionFailed -> "Connection Failed"
+                                    is PeerConnectionState.ConnectionRejected -> "Connection Rejected"
+                                    is PeerConnectionState.ConnectionTimeout -> "Connection Timeout"
+                                    is PeerConnectionState.ConnectionLost -> "Connection Lost"
+                                    is PeerConnectionState.BluetoothDisabled -> "Bluetooth Disabled"
+                                    is PeerConnectionState.PermissionRevoked -> "Permission Revoked"
                                     is PeerConnectionState.Failed -> "Link failed"
-                                    is PeerConnectionState.Disconnected -> "Offline channel"
+                                    is PeerConnectionState.Idle, is PeerConnectionState.Disconnected -> "Disconnected"
                                 }
 
                                 Box(
@@ -260,27 +271,75 @@ fun ChatScreen(
                         .padding(32.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = Icons.Default.Shield,
-                            contentDescription = null,
-                            tint = AccentCyan,
-                            modifier = Modifier.size(40.dp)
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF1E293B)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = state.peerDisplayName.take(1).uppercase(),
+                                color = AccentEmerald,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 24.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(14.dp))
                         Text(
-                            text = "Offline P2P Channel",
+                            text = state.peerDisplayName,
                             color = TextPrimary,
-                            style = MaterialTheme.typography.titleMedium,
+                            style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Messages are sent directly device-to-device with authenticated encryption. Zero internet, zero cloud servers.",
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.bodySmall,
-                            textAlign = TextAlign.Center
-                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isConnected) StatusOnline else TextMuted)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isConnected) "Connected" else "Offline",
+                                color = if (isConnected) AccentEmerald else TextMuted,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(24.dp))
+                        androidx.compose.material3.Card(
+                            colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = BgCardDark),
+                            shape = RoundedCornerShape(14.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, BorderSubtle),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(18.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = "No messages yet.",
+                                    color = TextPrimary,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                    textAlign = TextAlign.Center
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "Messaging will be available after the transport layer is implemented.",
+                                    color = TextSecondary,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    textAlign = TextAlign.Center,
+                                    lineHeight = 20.sp
+                                )
+                            }
+                        }
                     }
                 }
             } else {
@@ -300,7 +359,7 @@ fun ChatScreen(
                 }
             }
 
-            // Input Bar
+            // Input Bar (Disabled in Phase 4 per prompt specification)
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -315,24 +374,25 @@ fun ChatScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     OutlinedTextField(
-                        value = state.inputText,
-                        onValueChange = { viewModel.onInputTextChanged(it) },
+                        value = "",
+                        onValueChange = {},
+                        enabled = false,
                         placeholder = {
-                            Text("Type an offline message...", color = TextMuted, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                "Messaging will be available in Phase 5",
+                                color = TextMuted,
+                                style = MaterialTheme.typography.bodySmall
+                            )
                         },
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(22.dp)),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedContainerColor = BgInputDark,
-                            unfocusedContainerColor = BgInputDark,
-                            focusedBorderColor = AccentEmerald,
-                            unfocusedBorderColor = BorderSubtle,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary,
-                            cursorColor = AccentEmerald
+                            disabledContainerColor = BgInputDark.copy(alpha = 0.6f),
+                            disabledBorderColor = BorderSubtle.copy(alpha = 0.5f),
+                            disabledTextColor = TextMuted,
+                            disabledPlaceholderColor = TextMuted
                         ),
-                        maxLines = 4,
                         shape = RoundedCornerShape(22.dp)
                     )
 
@@ -342,27 +402,19 @@ fun ChatScreen(
                         modifier = Modifier
                             .size(44.dp)
                             .clip(CircleShape)
-                            .background(if (state.inputText.isNotBlank() && !state.isSending) AccentEmerald else Color(0xFF1E293B)),
+                            .background(Color(0xFF1E293B)),
                         contentAlignment = Alignment.Center
                     ) {
-                        if (state.isSending) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                color = AccentEmerald,
-                                strokeWidth = 2.dp
+                        IconButton(
+                            onClick = {},
+                            enabled = false
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "Messaging not yet available",
+                                tint = TextMuted.copy(alpha = 0.4f),
+                                modifier = Modifier.size(18.dp)
                             )
-                        } else {
-                            IconButton(
-                                onClick = { viewModel.sendMessage() },
-                                enabled = state.inputText.isNotBlank()
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.Send,
-                                    contentDescription = "Send",
-                                    tint = if (state.inputText.isNotBlank()) Color.Black else TextMuted,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
                         }
                     }
                 }

@@ -4,14 +4,19 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.offlinechat.data.discovery.BluetoothPermissionHelper
+import com.offlinechat.domain.connection.ConnectionManager
 import com.offlinechat.domain.model.DiscoveryStatus
 import com.offlinechat.domain.model.Peer
+import com.offlinechat.domain.model.PeerConnectionState
+import com.offlinechat.domain.repository.ConversationRepository
 import com.offlinechat.domain.usecase.ConnectPeerUseCase
+import com.offlinechat.domain.usecase.DisconnectPeerUseCase
 import com.offlinechat.domain.usecase.DiscoverPeersUseCase
 import com.offlinechat.domain.usecase.GetLocalDeviceIdentityUseCase
 import com.offlinechat.service.ConnectionForegroundService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -19,12 +24,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 data class DiscoveryUiState(
     val isScanning: Boolean = false,
     val discoveryStatus: DiscoveryStatus = DiscoveryStatus.Idle,
     val peers: List<Peer> = emptyList(),
+    val peerStates: Map<String, PeerConnectionState> = emptyMap(),
     val connectingPeerId: String? = null,
     val pendingTrustPeer: Peer? = null,
     val errorMessage: String? = null,
@@ -48,6 +55,9 @@ class DiscoveryViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val discoverPeersUseCase: DiscoverPeersUseCase,
     private val connectPeerUseCase: ConnectPeerUseCase,
+    private val disconnectPeerUseCase: DisconnectPeerUseCase,
+    private val connectionManager: ConnectionManager,
+    private val conversationRepository: ConversationRepository,
     private val getLocalDeviceIdentityUseCase: GetLocalDeviceIdentityUseCase,
     val permissionHelper: BluetoothPermissionHelper
 ) : ViewModel() {
@@ -58,6 +68,7 @@ class DiscoveryViewModel @Inject constructor(
     private val _navEvents = MutableSharedFlow<DiscoveryNavigationEvent>()
     val navEvents: SharedFlow<DiscoveryNavigationEvent> = _navEvents.asSharedFlow()
 
+    private val observedPeersJobs = ConcurrentHashMap<String, Job>()
     private var localDisplayName = ""
     private var localDeviceId = ""
 
@@ -72,7 +83,6 @@ class DiscoveryViewModel @Inject constructor(
             getLocalDeviceIdentityUseCase().collect { identity ->
                 localDisplayName = identity.displayName
                 localDeviceId = identity.deviceId
-                // Pre-check permissions before automatic scan
                 if (permissionHelper.hasRequiredPermissions() && permissionHelper.isBluetoothEnabled()) {
                     startScan()
                 } else if (!permissionHelper.isBluetoothEnabled()) {
@@ -91,6 +101,18 @@ class DiscoveryViewModel @Inject constructor(
         viewModelScope.launch {
             discoverPeersUseCase.discoveredPeers.collect { list ->
                 _uiState.value = _uiState.value.copy(peers = list)
+                // Start observing connection states for newly discovered peers
+                list.forEach { peer ->
+                    if (!observedPeersJobs.containsKey(peer.deviceId)) {
+                        observedPeersJobs[peer.deviceId] = launch {
+                            connectionManager.observeConnectionState(peer.deviceId).collect { state ->
+                                _uiState.value = _uiState.value.copy(
+                                    peerStates = _uiState.value.peerStates + (peer.deviceId to state)
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
         viewModelScope.launch {
@@ -263,11 +285,53 @@ class DiscoveryViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(isBluetoothDisabled = false)
     }
 
-    fun onPeerClicked(peer: Peer) {
+    fun onConnectClicked(peer: Peer) {
+        // Prevent concurrent multiple connection attempts to the same or conflicting peer
+        if (_uiState.value.connectingPeerId != null) return
+
         if (!peer.isTrusted) {
             _uiState.value = _uiState.value.copy(pendingTrustPeer = peer)
         } else {
             connectToPeer(peer)
+        }
+    }
+
+    fun onCancelConnectClicked(peer: Peer) {
+        viewModelScope.launch {
+            connectionManager.cancelConnection(peer.deviceId)
+            _uiState.value = _uiState.value.copy(
+                connectingPeerId = null,
+                peerStates = _uiState.value.peerStates + (peer.deviceId to PeerConnectionState.Disconnected)
+            )
+        }
+    }
+
+    fun onDisconnectClicked(peer: Peer) {
+        viewModelScope.launch {
+            disconnectPeerUseCase(peer.deviceId)
+            _uiState.value = _uiState.value.copy(
+                peerStates = _uiState.value.peerStates + (peer.deviceId to PeerConnectionState.Disconnected),
+                peers = _uiState.value.peers.map {
+                    if (it.deviceId == peer.deviceId) it.copy(isConnected = false) else it
+                }
+            )
+        }
+    }
+
+    fun onOpenChatClicked(peer: Peer) {
+        viewModelScope.launch {
+            val conversation = conversationRepository.getOrCreateConversation(
+                peerId = peer.deviceId,
+                peerDisplayName = peer.displayName,
+                transportType = peer.transportType
+            )
+            _navEvents.emit(
+                DiscoveryNavigationEvent.OpenChat(
+                    conversationId = conversation.id,
+                    peerId = peer.deviceId,
+                    peerDisplayName = peer.displayName
+                )
+            )
         }
     }
 
@@ -284,27 +348,30 @@ class DiscoveryViewModel @Inject constructor(
     }
 
     private fun connectToPeer(peer: Peer) {
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(connectingPeerId = peer.deviceId)
-            val result = connectPeerUseCase(peer)
+        if (_uiState.value.connectingPeerId == peer.deviceId) return
 
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                connectingPeerId = peer.deviceId,
+                peerStates = _uiState.value.peerStates + (peer.deviceId to PeerConnectionState.Connecting)
+            )
+
+            val result = connectPeerUseCase(peer)
             _uiState.value = _uiState.value.copy(connectingPeerId = null)
 
             if (result.isSuccess) {
-                val conversation = result.getOrThrow()
-                // Start Foreground Service to maintain persistent active link
                 ConnectionForegroundService.startService(context, peer.displayName)
-
-                _navEvents.emit(
-                    DiscoveryNavigationEvent.OpenChat(
-                        conversationId = conversation.id,
-                        peerId = peer.deviceId,
-                        peerDisplayName = peer.displayName
-                    )
+                _uiState.value = _uiState.value.copy(
+                    peers = _uiState.value.peers.map {
+                        if (it.deviceId == peer.deviceId) it.copy(isConnected = true) else it
+                    },
+                    peerStates = _uiState.value.peerStates + (peer.deviceId to PeerConnectionState.Connected)
                 )
             } else {
+                val failureMsg = result.exceptionOrNull()?.message ?: "Failed to connect to peer"
                 _uiState.value = _uiState.value.copy(
-                    errorMessage = result.exceptionOrNull()?.message ?: "Failed to connect to peer"
+                    errorMessage = failureMsg,
+                    peerStates = _uiState.value.peerStates + (peer.deviceId to PeerConnectionState.ConnectionFailed(failureMsg))
                 )
             }
         }
@@ -316,6 +383,8 @@ class DiscoveryViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        observedPeersJobs.values.forEach { it.cancel() }
+        observedPeersJobs.clear()
         viewModelScope.launch {
             discoverPeersUseCase.stopDiscovery()
         }
