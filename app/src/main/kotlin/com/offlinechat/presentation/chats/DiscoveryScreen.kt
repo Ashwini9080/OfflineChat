@@ -35,12 +35,15 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.BluetoothSearching
+import androidx.compose.material.icons.filled.NetworkWifi
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.WifiOff
+import com.offlinechat.domain.model.TransportType
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -105,6 +108,20 @@ fun DiscoveryScreen(
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             viewModel.onBluetoothEnabled()
+        }
+    }
+
+    val enableWifiLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        viewModel.onWifiEnabled()
+    }
+
+    val filteredPeers = remember(state.peers, state.selectedTransportFilter) {
+        if (state.selectedTransportFilter == null) {
+            state.peers
+        } else {
+            state.peers.filter { it.transportType == state.selectedTransportFilter }
         }
     }
 
@@ -383,20 +400,106 @@ fun DiscoveryScreen(
                 }
             }
 
+            // Wi-Fi Disabled Banner
+            AnimatedVisibility(visible = state.isWifiDisabled, enter = fadeIn(), exit = fadeOut()) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0F2338)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, AccentCyan.copy(alpha = 0.6f)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.WifiOff,
+                            contentDescription = null,
+                            tint = AccentCyan,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Wi-Fi is turned off",
+                                color = TextPrimary,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Turn it on to discover nearby Wi-Fi Direct peers.",
+                                color = Color(0xFFBAE6FD),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Button(
+                            onClick = {
+                                enableWifiLauncher.launch(viewModel.wifiPermissionHelper.createEnableWifiIntent())
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AccentCyan,
+                                contentColor = Color.Black
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Text("Turn On", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
             // Radar Pulse Banner with Status Details
             RadarPulseBanner(
                 isScanning = state.isScanning,
-                count = state.peers.size,
+                count = filteredPeers.size,
                 status = state.discoveryStatus,
                 onToggleScan = {
                     if (state.isScanning) viewModel.stopScan() else viewModel.startScan()
                 }
             )
 
-            Spacer(modifier = Modifier.height(6.dp))
+            // Transport Filter Selector Chips
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                TransportFilterChip(
+                    label = "All (${state.peers.size})",
+                    selected = state.selectedTransportFilter == null,
+                    onClick = { viewModel.selectTransportFilter(null) }
+                )
+                TransportFilterChip(
+                    label = "Bluetooth",
+                    icon = Icons.Default.Bluetooth,
+                    selected = state.selectedTransportFilter == TransportType.BLUETOOTH,
+                    onClick = { viewModel.selectTransportFilter(TransportType.BLUETOOTH) }
+                )
+                TransportFilterChip(
+                    label = "Wi-Fi Direct",
+                    icon = Icons.Default.NetworkWifi,
+                    selected = state.selectedTransportFilter == TransportType.WIFI_DIRECT,
+                    onClick = { viewModel.selectTransportFilter(TransportType.WIFI_DIRECT) }
+                )
+            }
 
-            if (state.peers.isEmpty()) {
-                // Empty state matching prompt requirements
+            Spacer(modifier = Modifier.height(4.dp))
+
+            if (filteredPeers.isEmpty()) {
+                val emptyMessage = when {
+                    state.isScanning -> "Searching for nearby devices..."
+                    state.selectedTransportFilter == TransportType.WIFI_DIRECT -> "No nearby Wi-Fi Direct devices found."
+                    state.selectedTransportFilter == TransportType.BLUETOOTH -> "No nearby Bluetooth devices found."
+                    else -> "No nearby compatible devices found."
+                }
+
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -407,15 +510,19 @@ fun DiscoveryScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.fillMaxWidth()
                     ) {
+                        val emptyIcon = when (state.selectedTransportFilter) {
+                            TransportType.WIFI_DIRECT -> Icons.Default.NetworkWifi
+                            else -> Icons.Default.BluetoothSearching
+                        }
                         Icon(
-                            imageVector = Icons.Default.BluetoothSearching,
+                            imageVector = emptyIcon,
                             contentDescription = null,
                             tint = if (state.isScanning) AccentCyan else TextMuted,
                             modifier = Modifier.size(56.dp)
                         )
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
-                            text = if (state.isScanning) "Searching for nearby devices..." else "No nearby compatible devices found.",
+                            text = emptyMessage,
                             color = TextPrimary,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold,
@@ -437,7 +544,7 @@ fun DiscoveryScreen(
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
-                                    text = "• Bluetooth is turned on\n• Nearby permissions are allowed\n• The other device is discoverable / has OfflineChat open",
+                                    text = "• Bluetooth & Wi-Fi are turned on\n• Nearby device permissions are allowed\n• The other device is discoverable / has OfflineChat open",
                                     color = TextSecondary,
                                     style = MaterialTheme.typography.bodySmall,
                                     lineHeight = 20.sp
@@ -487,7 +594,7 @@ fun DiscoveryScreen(
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    items(state.peers, key = { it.deviceId }) { peer ->
+                    items(filteredPeers, key = { it.deviceId }) { peer ->
                         val peerState = state.peerStates[peer.deviceId]
                             ?: if (peer.isConnected) PeerConnectionState.Connected else PeerConnectionState.Idle
                         PeerItem(
@@ -535,20 +642,23 @@ private fun RadarPulseBanner(
     val statusText = when (status) {
         is DiscoveryStatus.Idle -> "Scanner Idle"
         is DiscoveryStatus.CheckingBluetooth -> "Checking Bluetooth state..."
+        is DiscoveryStatus.CheckingWifi -> "Checking Wi-Fi state..."
         is DiscoveryStatus.CheckingPermissions -> "Checking permissions..."
-        is DiscoveryStatus.StartingDiscovery -> "Starting Bluetooth inquiry..."
+        is DiscoveryStatus.StartingDiscovery -> "Starting peer discovery..."
         is DiscoveryStatus.Discovering -> "Active Discovery Scanning"
         is DiscoveryStatus.DeviceFound -> "$count device(s) discovered"
         is DiscoveryStatus.DiscoveryComplete -> "Discovery cycle completed"
         is DiscoveryStatus.DiscoveryCancelled -> "Discovery stopped"
         is DiscoveryStatus.BluetoothDisabled -> "Bluetooth disabled"
         is DiscoveryStatus.BluetoothUnavailable -> "Bluetooth unavailable"
+        is DiscoveryStatus.WifiDisabled -> "Wi-Fi turned off"
+        is DiscoveryStatus.WifiDirectUnsupported -> "Wi-Fi Direct unsupported"
         is DiscoveryStatus.PermissionRequired -> "Permissions missing"
         is DiscoveryStatus.PermissionDenied -> "Permissions denied"
         is DiscoveryStatus.PermissionPermanentlyDenied -> "Permission permanently restricted"
         is DiscoveryStatus.PermissionRevoked -> "Permissions revoked"
         is DiscoveryStatus.PermissionGranted -> "Permissions allowed"
-        is DiscoveryStatus.ReadyForDiscovery -> "Bluetooth ready"
+        is DiscoveryStatus.ReadyForDiscovery -> "Radios ready"
         is DiscoveryStatus.DiscoveryFailed -> "Discovery failed"
     }
 
@@ -597,9 +707,50 @@ private fun RadarPulseBanner(
         )
 
         Text(
-            text = if (count > 0) "$count compatible peer(s) found" else "Scanning Classic inquiry & BLE beacons",
+            text = if (count > 0) "$count compatible peer(s) found" else "Scanning Bluetooth & Wi-Fi Direct",
             color = TextMuted,
             style = MaterialTheme.typography.labelSmall
         )
+    }
+}
+
+@Composable
+private fun TransportFilterChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(if (selected) AccentCyan else BgCardDark)
+            .border(
+                1.dp,
+                if (selected) AccentCyan else BorderSubtle,
+                RoundedCornerShape(20.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (selected) Color.Black else TextSecondary,
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+            Text(
+                text = label,
+                color = if (selected) Color.Black else TextSecondary,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+            )
+        }
     }
 }

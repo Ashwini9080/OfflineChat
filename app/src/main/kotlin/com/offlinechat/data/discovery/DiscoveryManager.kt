@@ -26,7 +26,23 @@ class DiscoveryManager @Inject constructor(
     private val _discoveredPeers = MutableStateFlow<List<Peer>>(emptyList())
     override val discoveredPeers: Flow<List<Peer>> = _discoveredPeers.asStateFlow()
 
-    override val discoveryStatus: Flow<DiscoveryStatus> = bluetoothDiscovery.discoveryStatus
+    override val discoveryStatus: Flow<DiscoveryStatus> = combine(
+        bluetoothDiscovery.discoveryStatus,
+        wifiDirectDiscovery.discoveryStatus
+    ) { btStatus, wifiStatus ->
+        when {
+            wifiStatus is DiscoveryStatus.DeviceFound -> wifiStatus
+            btStatus is DiscoveryStatus.DeviceFound -> btStatus
+            wifiStatus is DiscoveryStatus.Discovering -> wifiStatus
+            btStatus is DiscoveryStatus.Discovering -> btStatus
+            wifiStatus is DiscoveryStatus.StartingDiscovery -> wifiStatus
+            btStatus is DiscoveryStatus.StartingDiscovery -> btStatus
+            wifiStatus is DiscoveryStatus.WifiDisabled -> wifiStatus
+            btStatus is DiscoveryStatus.BluetoothDisabled -> btStatus
+            wifiStatus !is DiscoveryStatus.Idle -> wifiStatus
+            else -> btStatus
+        }
+    }
 
     private val _isDiscovering = MutableStateFlow(false)
     override val isDiscovering: Flow<Boolean> = _isDiscovering.asStateFlow()

@@ -21,6 +21,9 @@ sealed interface DiscoveryStatus {
     data object DiscoveryCancelled : DiscoveryStatus
     data object BluetoothDisabled : DiscoveryStatus
     data object BluetoothUnavailable : DiscoveryStatus
+    data object CheckingWifi : DiscoveryStatus
+    data object WifiDisabled : DiscoveryStatus
+    data object WifiDirectUnsupported : DiscoveryStatus
     data class PermissionRequired(val permissions: List<String>) : DiscoveryStatus
     data object PermissionDenied : DiscoveryStatus
     data object PermissionPermanentlyDenied : DiscoveryStatus

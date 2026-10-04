@@ -27,6 +27,9 @@ import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
+import com.offlinechat.data.discovery.WifiDirectPermissionHelper
+import com.offlinechat.domain.model.TransportType
+
 data class DiscoveryUiState(
     val isScanning: Boolean = false,
     val discoveryStatus: DiscoveryStatus = DiscoveryStatus.Idle,
@@ -38,8 +41,11 @@ data class DiscoveryUiState(
     val missingPermissions: List<String> = emptyList(),
     val isBluetoothDisabled: Boolean = false,
     val isBluetoothUnavailable: Boolean = false,
+    val isWifiDisabled: Boolean = false,
+    val isWifiDirectUnsupported: Boolean = false,
     val showPermissionRationale: Boolean = false,
-    val isPermissionPermanentlyDenied: Boolean = false
+    val isPermissionPermanentlyDenied: Boolean = false,
+    val selectedTransportFilter: TransportType? = null
 )
 
 sealed interface DiscoveryNavigationEvent {
@@ -59,7 +65,8 @@ class DiscoveryViewModel @Inject constructor(
     private val connectionManager: ConnectionManager,
     private val conversationRepository: ConversationRepository,
     private val getLocalDeviceIdentityUseCase: GetLocalDeviceIdentityUseCase,
-    val permissionHelper: BluetoothPermissionHelper
+    val permissionHelper: BluetoothPermissionHelper,
+    val wifiPermissionHelper: WifiDirectPermissionHelper
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DiscoveryUiState())
@@ -140,6 +147,18 @@ class DiscoveryViewModel @Inject constructor(
                             isScanning = false
                         )
                     }
+                    is DiscoveryStatus.WifiDisabled -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            isWifiDisabled = true
+                        )
+                    }
+                    is DiscoveryStatus.WifiDirectUnsupported -> {
+                        _uiState.value.copy(
+                            discoveryStatus = status,
+                            isWifiDirectUnsupported = true
+                        )
+                    }
                     is DiscoveryStatus.PermissionRequired -> {
                         _uiState.value.copy(
                             discoveryStatus = status,
@@ -218,21 +237,33 @@ class DiscoveryViewModel @Inject constructor(
         }
     }
 
+    fun selectTransportFilter(filter: TransportType?) {
+        _uiState.value = _uiState.value.copy(selectedTransportFilter = filter)
+    }
+
     fun startScan() {
-        if (!permissionHelper.isBluetoothSupported()) {
-            _uiState.value = _uiState.value.copy(isBluetoothUnavailable = true)
+        val btSupported = permissionHelper.isBluetoothSupported()
+        val btEnabled = permissionHelper.isBluetoothEnabled()
+        val btPerms = permissionHelper.hasRequiredPermissions()
+
+        val wifiSupported = wifiPermissionHelper.isWifiDirectSupported()
+        val wifiEnabled = wifiPermissionHelper.isWifiEnabled()
+        val wifiPerms = wifiPermissionHelper.hasRequiredPermissions()
+
+        if (!btSupported && !wifiSupported) {
+            _uiState.value = _uiState.value.copy(isBluetoothUnavailable = true, isWifiDirectUnsupported = true)
             return
         }
 
-        if (!permissionHelper.isBluetoothEnabled()) {
-            _uiState.value = _uiState.value.copy(isBluetoothDisabled = true)
+        if (!btEnabled && !wifiEnabled) {
+            _uiState.value = _uiState.value.copy(isBluetoothDisabled = true, isWifiDisabled = true)
             return
         }
 
-        if (!permissionHelper.hasRequiredPermissions()) {
-            val missing = permissionHelper.getMissingPermissions()
+        val allMissing = (permissionHelper.getMissingPermissions() + wifiPermissionHelper.getMissingPermissions()).distinct()
+        if (allMissing.isNotEmpty() && !btPerms && !wifiPerms) {
             _uiState.value = _uiState.value.copy(
-                missingPermissions = missing,
+                missingPermissions = allMissing,
                 showPermissionRationale = true
             )
             return
@@ -257,6 +288,11 @@ class DiscoveryViewModel @Inject constructor(
 
     fun onBluetoothEnabled() {
         _uiState.value = _uiState.value.copy(isBluetoothDisabled = false)
+        startScan()
+    }
+
+    fun onWifiEnabled() {
+        _uiState.value = _uiState.value.copy(isWifiDisabled = false)
         startScan()
     }
 

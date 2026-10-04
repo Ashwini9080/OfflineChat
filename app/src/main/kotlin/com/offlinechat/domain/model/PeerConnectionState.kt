@@ -15,6 +15,8 @@ sealed interface PeerConnectionState {
     data class ConnectionTimeout(val timeoutMs: Long = 15000L) : PeerConnectionState
     data class ConnectionLost(val reason: String = "") : PeerConnectionState
     data object BluetoothDisabled : PeerConnectionState
+    data object WifiDisabled : PeerConnectionState
+    data object PeerUnavailable : PeerConnectionState
     data object PermissionRevoked : PeerConnectionState
 
     // Backward compatibility aliases / states

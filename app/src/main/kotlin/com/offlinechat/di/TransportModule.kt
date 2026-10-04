@@ -1,6 +1,6 @@
 package com.offlinechat.di
 
-import com.offlinechat.data.connection.BluetoothConnectionManager
+import com.offlinechat.data.connection.UnifiedConnectionManager
 import com.offlinechat.domain.connection.ConnectionManager
 import com.offlinechat.data.discovery.DeviceDiscovery
 import com.offlinechat.data.discovery.DiscoveryManager
@@ -19,7 +19,7 @@ abstract class TransportModule {
     @Binds
     @Singleton
     abstract fun bindConnectionManager(
-        bluetoothConnectionManager: BluetoothConnectionManager
+        unifiedConnectionManager: UnifiedConnectionManager
     ): ConnectionManager
 
     @Binds

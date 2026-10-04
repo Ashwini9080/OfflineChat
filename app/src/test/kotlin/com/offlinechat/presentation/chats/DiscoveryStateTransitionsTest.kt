@@ -158,4 +158,56 @@ class DiscoveryStateTransitionsTest {
         assertTrue(state.isScanning)
         assertEquals(3, (state.discoveryStatus as DiscoveryStatus.DeviceFound).count)
     }
+
+    @Test
+    fun `transition to WifiDisabled flags wifi banner`() {
+        var state = DiscoveryUiState(isScanning = true)
+        val status = DiscoveryStatus.WifiDisabled
+
+        state = state.copy(
+            discoveryStatus = status,
+            isWifiDisabled = true
+        )
+
+        assertTrue(state.isWifiDisabled)
+        assertEquals(DiscoveryStatus.WifiDisabled, state.discoveryStatus)
+    }
+
+    @Test
+    fun `transition to WifiDirectUnsupported flags unsupported state`() {
+        var state = DiscoveryUiState()
+        val status = DiscoveryStatus.WifiDirectUnsupported
+
+        state = state.copy(
+            discoveryStatus = status,
+            isWifiDirectUnsupported = true
+        )
+
+        assertTrue(state.isWifiDirectUnsupported)
+        assertEquals(DiscoveryStatus.WifiDirectUnsupported, state.discoveryStatus)
+    }
+
+    @Test
+    fun `transport filter properly isolates Bluetooth and WifiDirect peers`() {
+        val btPeer = com.offlinechat.domain.model.Peer(
+            deviceId = "bt-1",
+            displayName = "BT Device",
+            transportType = com.offlinechat.domain.model.TransportType.BLUETOOTH
+        )
+        val wifiPeer = com.offlinechat.domain.model.Peer(
+            deviceId = "wifi-1",
+            displayName = "Wi-Fi Device",
+            transportType = com.offlinechat.domain.model.TransportType.WIFI_DIRECT
+        )
+
+        val state = DiscoveryUiState(
+            peers = listOf(btPeer, wifiPeer),
+            selectedTransportFilter = com.offlinechat.domain.model.TransportType.WIFI_DIRECT
+        )
+
+        val filtered = state.peers.filter { it.transportType == state.selectedTransportFilter }
+        assertEquals(1, filtered.size)
+        assertEquals("wifi-1", filtered[0].deviceId)
+        assertEquals(com.offlinechat.domain.model.TransportType.WIFI_DIRECT, filtered[0].transportType)
+    }
 }
