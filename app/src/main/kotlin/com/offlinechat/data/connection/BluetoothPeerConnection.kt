@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
+import com.offlinechat.data.transport.framing.RfcommFrameCodec
 import com.offlinechat.domain.connection.PeerConnection
 import com.offlinechat.domain.model.Peer
 import com.offlinechat.domain.model.PeerConnectionState
@@ -18,12 +19,16 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -33,8 +38,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Concrete [PeerConnection] implementation using Android Bluetooth Classic RFCOMM (SPP).
  *
- * Implements full connection lifecycle monitoring, pairing awareness, connection timeout,
- * link-loss detection, Bluetooth state monitoring, and leak-free resource disposal.
+ * Implements length-prefixed bidirectional framing, non-blocking asynchronous read loop,
+ * serialized atomic writes, link-loss detection, timeout protection, and clean resource cleanup.
  */
 class BluetoothPeerConnection(
     override val peerId: String,
@@ -59,8 +64,11 @@ class BluetoothPeerConnection(
     private val _connectionState = MutableStateFlow<PeerConnectionState>(PeerConnectionState.Idle)
     override val connectionState: StateFlow<PeerConnectionState> = _connectionState.asStateFlow()
 
+    private val _incomingFrames = MutableSharedFlow<ByteArray>(extraBufferCapacity = 128)
+    val incomingFrames: SharedFlow<ByteArray> = _incomingFrames.asSharedFlow()
+
     private var activeSocket: BluetoothSocket? = null
-    private var monitorJob: Job? = null
+    private var frameReaderJob: Job? = null
     private var isIntentionalDisconnect = AtomicBoolean(false)
     private var receiverRegistered = AtomicBoolean(false)
 
@@ -77,7 +85,7 @@ class BluetoothPeerConnection(
         get() = activeSocket?.outputStream
 
     /**
-     * BroadcastReceiver to monitor local Bluetooth radio state changes and pairing state changes.
+     * BroadcastReceiver to monitor local Bluetooth radio state changes.
      */
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, intent: Intent?) {
@@ -136,6 +144,16 @@ class BluetoothPeerConnection(
         }
     }
 
+    /**
+     * Attaches an already-connected socket (e.g., from an accepted server socket connection)
+     */
+    fun attachSocket(socket: BluetoothSocket, displayName: String) {
+        activeSocket = socket
+        isIntentionalDisconnect.set(false)
+        _connectionState.value = PeerConnectionState.Connected
+        startFrameReader(socket, displayName)
+    }
+
     @SuppressLint("MissingPermission")
     override suspend fun connect(peer: Peer): Result<Unit> = withContext(ioDispatcher) {
         val adapter = bluetoothAdapter
@@ -176,7 +194,6 @@ class BluetoothPeerConnection(
                 Log.w(TAG, "Connection attempt to ${peer.displayName} [$address] timed out after ${CONNECTION_TIMEOUT_MS}ms")
                 cleanupSocket(notifyDisconnected = false)
                 _connectionState.value = PeerConnectionState.ConnectionTimeout(CONNECTION_TIMEOUT_MS)
-                // Transition to ConnectionFailed after timeout per spec
                 _connectionState.value = PeerConnectionState.ConnectionFailed("Connection timed out after 15s")
                 Result.failure(IOException("Connection timed out after 15 seconds"))
             } else {
@@ -217,11 +234,6 @@ class BluetoothPeerConnection(
             adapter.cancelDiscovery()
         }
 
-        // Socket Creation Chain:
-        // 1. Insecure RFCOMM SPP (fast, pinless P2P pairing)
-        // 2. Secure RFCOMM SPP (standard Android authenticated pairing)
-        // 3. Custom App UUID
-        // 4. Reflection Channel 1 fallback
         val socket = createSocketWithFallback(remoteDevice)
             ?: return@withContext Result.failure(IOException("Failed to create RFCOMM socket to $address"))
 
@@ -232,8 +244,8 @@ class BluetoothPeerConnection(
         activeSocket = socket
         _connectionState.value = PeerConnectionState.Connected
 
-        // Start background connection loss monitor
-        startConnectionLossMonitor(socket, displayName)
+        // Launch frame reader loop
+        startFrameReader(socket, displayName)
 
         Result.success(Unit)
     }
@@ -261,7 +273,7 @@ class BluetoothPeerConnection(
             Log.w(TAG, "createInsecureRfcommSocketToServiceRecord(APP_UUID) failed, trying reflection", e)
         }
 
-        // Attempt 4: Direct Channel 1 reflection (well known workaround for non-standard OEM stacks)
+        // Attempt 4: Direct Channel 1 reflection
         try {
             val method = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
             return method.invoke(device, 1) as BluetoothSocket
@@ -273,30 +285,31 @@ class BluetoothPeerConnection(
     }
 
     /**
-     * Monitors the connected socket input stream for connection loss / EOF / unexpected closure.
+     * Continuous background loop reading length-prefixed message frames from the socket.
+     * Defragments frames and handles partial/multi reads cleanly.
      */
-    private fun startConnectionLossMonitor(socket: BluetoothSocket, displayName: String) {
-        monitorJob?.cancel()
-        monitorJob = scope.launch(ioDispatcher) {
+    private fun startFrameReader(socket: BluetoothSocket, displayName: String) {
+        frameReaderJob?.cancel()
+        frameReaderJob = scope.launch(ioDispatcher) {
             try {
                 val input = socket.inputStream
-                // We monitor the stream. Even without Phase 5 data, reading blocks until remote closes (returns -1)
-                // or socket drops (throws IOException).
-                val buffer = ByteArray(1)
                 while (socket.isConnected && !isIntentionalDisconnect.get()) {
-                    val read = input.read(buffer)
-                    if (read == -1) {
-                        Log.i(TAG, "Remote end closed socket stream (EOF) for $displayName [$peerId]")
+                    try {
+                        val frameData = RfcommFrameCodec.readFrame(input)
+                        Log.d(TAG, "Decoded frame (${frameData.size} bytes) from $displayName [$peerId]")
+                        _incomingFrames.emit(frameData)
+                    } catch (e: EOFException) {
+                        Log.i(TAG, "Remote peer closed connection (EOF) for $displayName [$peerId]")
+                        break
+                    } catch (e: IOException) {
+                        if (!isIntentionalDisconnect.get()) {
+                            Log.w(TAG, "IOException reading frame from $displayName [$peerId]: ${e.message}")
+                        }
                         break
                     }
-                    // In Phase 4, we only establish connection; bytes received (if any) are kept or discarded
-                }
-            } catch (e: IOException) {
-                if (!isIntentionalDisconnect.get()) {
-                    Log.w(TAG, "Connection lost unexpectedly to $displayName [$peerId]: ${e.message}")
                 }
             } catch (e: CancellationException) {
-                // Job was cancelled normally
+                // Job cancelled normally
             } finally {
                 if (!isIntentionalDisconnect.get() && _connectionState.value is PeerConnectionState.Connected) {
                     Log.w(TAG, "Reporting ConnectionLost for peer: $displayName")
@@ -304,6 +317,33 @@ class BluetoothPeerConnection(
                     cleanupSocket(notifyDisconnected = true)
                 }
             }
+        }
+    }
+
+    /**
+     * Atomically transmits a length-prefixed frame to the remote peer.
+     * Synchronised on the output stream so concurrent sends are never interleaved.
+     */
+    suspend fun sendFrame(data: ByteArray): Result<Unit> = withContext(ioDispatcher) {
+        val socket = activeSocket
+            ?: return@withContext Result.failure(IllegalStateException("No active socket for peer $peerId"))
+
+        if (!socket.isConnected) {
+            return@withContext Result.failure(IllegalStateException("Socket is disconnected for peer $peerId"))
+        }
+
+        try {
+            val out = socket.outputStream
+            RfcommFrameCodec.writeFrame(out, data)
+            Log.d(TAG, "Successfully sent frame (${data.size} bytes) to $peerId")
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write frame to peer $peerId", e)
+            if (!isIntentionalDisconnect.get()) {
+                _connectionState.value = PeerConnectionState.ConnectionLost("Write failure: ${e.message}")
+                cleanupSocket(notifyDisconnected = true)
+            }
+            Result.failure(e)
         }
     }
 
@@ -315,8 +355,8 @@ class BluetoothPeerConnection(
     }
 
     private fun cleanupSocket(notifyDisconnected: Boolean) {
-        monitorJob?.cancel()
-        monitorJob = null
+        frameReaderJob?.cancel()
+        frameReaderJob = null
 
         val socket = activeSocket
         activeSocket = null

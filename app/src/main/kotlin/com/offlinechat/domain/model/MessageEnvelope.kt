@@ -44,4 +44,20 @@ data class MessageEnvelope(
         result = 31 * result + (signature?.contentHashCode() ?: 0)
         return result
     }
+
+    companion object {
+        const val CURRENT_PROTOCOL_VERSION = 1
+        const val MAX_PAYLOAD_SIZE = 5 * 1024 * 1024 // 5 MB
+
+        fun isValid(envelope: MessageEnvelope): Boolean {
+            if (envelope.protocolVersion != CURRENT_PROTOCOL_VERSION) return false
+            if (envelope.messageId.isBlank()) return false
+            if (envelope.senderId.isBlank()) return false
+            if (envelope.receiverId.isBlank()) return false
+            if (envelope.timestamp <= 0) return false
+            if (envelope.payload.isEmpty() || envelope.payload.size > MAX_PAYLOAD_SIZE) return false
+            if (envelope.messageType !in listOf("TEXT", "ACK", "DELIVERY_ACK", "HANDSHAKE", "READ")) return false
+            return true
+        }
+    }
 }

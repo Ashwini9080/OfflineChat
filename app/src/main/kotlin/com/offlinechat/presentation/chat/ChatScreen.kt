@@ -302,12 +302,12 @@ fun ChatScreen(
                                 modifier = Modifier
                                     .size(8.dp)
                                     .clip(CircleShape)
-                                    .background(if (isConnected) StatusOnline else TextMuted)
+                                    .background(if (isConnected) StatusOnline else AccentRose)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = if (isConnected) "Connected" else "Offline",
-                                color = if (isConnected) AccentEmerald else TextMuted,
+                                text = if (isConnected) "Connected" else "Disconnected",
+                                color = if (isConnected) AccentEmerald else AccentRose,
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold
                             )
@@ -330,9 +330,13 @@ fun ChatScreen(
                                     fontWeight = FontWeight.SemiBold,
                                     textAlign = TextAlign.Center
                                 )
-                                Spacer(modifier = Modifier.height(8.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
                                 Text(
-                                    text = "Messaging will be available after the transport layer is implemented.",
+                                    text = if (isConnected) {
+                                        "Say hello! Messages travel directly device-to-device over Bluetooth with zero internet."
+                                    } else {
+                                        "Reconnect with ${state.peerDisplayName} to begin chatting offline."
+                                    },
                                     color = TextSecondary,
                                     style = MaterialTheme.typography.bodyMedium,
                                     textAlign = TextAlign.Center,
@@ -359,7 +363,50 @@ fun ChatScreen(
                 }
             }
 
-            // Input Bar (Disabled in Phase 4 per prompt specification)
+            // Disconnected Notice Banner
+            if (!isConnected) {
+                androidx.compose.material3.Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                    colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = Color(0xFF3B1219)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, AccentRose.copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(AccentRose)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Disconnected. Reconnect to continue chatting.",
+                            color = Color(0xFFFECDD3),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        androidx.compose.material3.TextButton(
+                            onClick = { viewModel.reconnect() }
+                        ) {
+                            Text(
+                                text = "Reconnect",
+                                color = AccentCyan,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Input Bar
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -374,47 +421,64 @@ fun ChatScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     OutlinedTextField(
-                        value = "",
-                        onValueChange = {},
-                        enabled = false,
+                        value = if (isConnected) state.inputText else "",
+                        onValueChange = { if (isConnected) viewModel.onInputTextChanged(it) },
+                        enabled = isConnected,
                         placeholder = {
                             Text(
-                                "Messaging will be available in Phase 5",
+                                text = if (isConnected) "Type a message..." else "Message input disabled",
                                 color = TextMuted,
-                                style = MaterialTheme.typography.bodySmall
+                                style = MaterialTheme.typography.bodyMedium
                             )
                         },
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(22.dp)),
                         colors = OutlinedTextFieldDefaults.colors(
-                            disabledContainerColor = BgInputDark.copy(alpha = 0.6f),
-                            disabledBorderColor = BorderSubtle.copy(alpha = 0.5f),
+                            focusedContainerColor = BgInputDark,
+                            unfocusedContainerColor = BgInputDark,
+                            disabledContainerColor = BgInputDark.copy(alpha = 0.5f),
+                            focusedBorderColor = AccentEmerald,
+                            unfocusedBorderColor = BorderSubtle,
+                            disabledBorderColor = BorderSubtle.copy(alpha = 0.4f),
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
                             disabledTextColor = TextMuted,
-                            disabledPlaceholderColor = TextMuted
+                            cursorColor = AccentEmerald
                         ),
+                        maxLines = 4,
                         shape = RoundedCornerShape(22.dp)
                     )
 
                     Spacer(modifier = Modifier.width(8.dp))
 
+                    val canSend = isConnected && state.inputText.isNotBlank() && !state.isSending
+
                     Box(
                         modifier = Modifier
                             .size(44.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF1E293B)),
+                            .background(if (canSend) AccentEmerald else Color(0xFF1E293B)),
                         contentAlignment = Alignment.Center
                     ) {
-                        IconButton(
-                            onClick = {},
-                            enabled = false
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Send,
-                                contentDescription = "Messaging not yet available",
-                                tint = TextMuted.copy(alpha = 0.4f),
-                                modifier = Modifier.size(18.dp)
+                        if (state.isSending) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                color = AccentEmerald,
+                                strokeWidth = 2.dp
                             )
+                        } else {
+                            IconButton(
+                                onClick = { viewModel.sendMessage() },
+                                enabled = canSend
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = "Send",
+                                    tint = if (canSend) Color.Black else TextMuted,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }

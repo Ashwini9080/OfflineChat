@@ -10,6 +10,7 @@ import android.content.Context
 import android.util.Log
 import com.offlinechat.domain.connection.ConnectionManager
 import com.offlinechat.domain.connection.PeerConnection
+import com.offlinechat.domain.model.MessageEnvelope
 import com.offlinechat.domain.model.Peer
 import com.offlinechat.domain.model.PeerConnectionState
 import com.offlinechat.domain.model.TransportType
@@ -20,11 +21,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.Json
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -32,16 +37,8 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Singleton implementation of [ConnectionManager] coordinating Bluetooth RFCOMM connections.
- *
- * Responsibilities:
- * - Starting outgoing Bluetooth connections
- * - Listening for incoming Bluetooth connections (so Phone A <-> Phone B both establish connected state)
- * - Enforcing connection ownership and preventing duplicate/conflicting connection attempts
- * - Providing a unified, reactive [PeerConnectionState] stream per peer
- * - Cancelling in-flight connections
- * - Disconnecting and releasing all resources
- * - Caching non-sensitive peer metadata for future reconnection
+ * Centralized manager coordinating Bluetooth Classic RFCOMM connections,
+ * bidirectional message frame routing, and lifecycle states.
  */
 @Singleton
 class BluetoothConnectionManager @Inject constructor(
@@ -56,22 +53,27 @@ class BluetoothConnectionManager @Inject constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val connectionMutex = Mutex()
+    private val json = Json { ignoreUnknownKeys = true }
 
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
     val bluetoothAdapter: BluetoothAdapter?
         get() = bluetoothManager?.adapter
 
-    // Active connection wrappers keyed by peerId (or Bluetooth address)
-    private val activeConnections = ConcurrentHashMap<String, PeerConnection>()
+    // Active connection wrappers keyed by peerId
+    private val activeConnections = ConcurrentHashMap<String, BluetoothPeerConnection>()
 
-    // Observable states keyed by peerId
+    // Observable connection lifecycle states keyed by peerId
     private val connectionStates = ConcurrentHashMap<String, MutableStateFlow<PeerConnectionState>>()
 
     // In-flight connection jobs
     private val connectionJobs = ConcurrentHashMap<String, Job>()
 
-    // Reconnection metadata cache: non-sensitive identification info
+    // Reconnection metadata cache
     private val lastKnownPeers = ConcurrentHashMap<String, Peer>()
+
+    // Global incoming message stream from all active Bluetooth peer sockets
+    private val _incomingEnvelopes = MutableSharedFlow<MessageEnvelope>(extraBufferCapacity = 128)
+    val incomingEnvelopes: SharedFlow<MessageEnvelope> = _incomingEnvelopes.asSharedFlow()
 
     // Server socket listening for incoming RFCOMM peer connections
     private var serverSocket: BluetoothServerSocket? = null
@@ -99,6 +101,10 @@ class BluetoothConnectionManager @Inject constructor(
         return activeConnections[peerId]
     }
 
+    fun getActiveBluetoothConnection(peerId: String): BluetoothPeerConnection? {
+        return activeConnections[peerId]
+    }
+
     private fun getOrCreateStateFlow(peerId: String): MutableStateFlow<PeerConnectionState> {
         return connectionStates.getOrPut(peerId) {
             MutableStateFlow(PeerConnectionState.Idle)
@@ -117,7 +123,6 @@ class BluetoothConnectionManager @Inject constructor(
         serverListenJob?.cancel()
         serverListenJob = scope.launch(ioDispatcher) {
             try {
-                // Insecure RFCOMM listener for streamlined pairing
                 val server = try {
                     adapter.listenUsingInsecureRfcommWithServiceRecord(
                         SERVER_SERVICE_NAME,
@@ -157,7 +162,7 @@ class BluetoothConnectionManager @Inject constructor(
         val remoteDevice: BluetoothDevice? = socket.remoteDevice
         val address = remoteDevice?.address ?: "UNKNOWN"
         val name = remoteDevice?.name ?: "Nearby Device"
-        val peerId = address // Use address as deterministic device identifier if not yet exchanged
+        val peerId = address
 
         Log.i(TAG, "Incoming Bluetooth RFCOMM connection accepted from: $name [$address]")
 
@@ -179,12 +184,15 @@ class BluetoothConnectionManager @Inject constructor(
             ioDispatcher = ioDispatcher
         )
 
-        // Close any prior connection for this peer
+        // Close prior connection for this peer
         activeConnections.remove(peerId)?.release()
         activeConnections[peerId] = peerConnection
 
         val stateFlow = getOrCreateStateFlow(peerId)
         stateFlow.value = PeerConnectionState.Connected
+
+        // Attach incoming socket and start frame reader
+        peerConnection.attachSocket(socket, name)
 
         // Forward connection states
         scope.launch {
@@ -195,17 +203,19 @@ class BluetoothConnectionManager @Inject constructor(
                 }
             }
         }
+
+        // Listen for incoming frames from this peer
+        listenForFrames(peerConnection)
     }
 
     /**
      * Connects to a target peer.
-     * Prevents duplicate/conflicting connection attempts (Section 6).
+     * Enforces connection ownership and starts frame listener.
      */
     override suspend fun connect(peer: Peer): Result<Unit> {
         connectionMutex.withLock {
             val currentState = getConnectionState(peer.deviceId)
 
-            // Prevent duplicate connection attempts
             if (currentState is PeerConnectionState.Connecting) {
                 Log.w(TAG, "Connection attempt already active for peer: ${peer.displayName} [${peer.deviceId}]")
                 return Result.failure(IllegalStateException("Connection already in progress for ${peer.displayName}"))
@@ -216,13 +226,11 @@ class BluetoothConnectionManager @Inject constructor(
                 return Result.success(Unit)
             }
 
-            // Cache peer for future reconnection
             lastKnownPeers[peer.deviceId] = peer
 
             val stateFlow = getOrCreateStateFlow(peer.deviceId)
             stateFlow.value = PeerConnectionState.Connecting
 
-            // Create new BluetoothPeerConnection
             val peerConnection = BluetoothPeerConnection(
                 peerId = peer.deviceId,
                 context = context,
@@ -231,11 +239,9 @@ class BluetoothConnectionManager @Inject constructor(
                 ioDispatcher = ioDispatcher
             )
 
-            // Replace any existing connection
             activeConnections.remove(peer.deviceId)?.release()
             activeConnections[peer.deviceId] = peerConnection
 
-            // Monitor state changes
             val stateObservationJob = scope.launch {
                 peerConnection.connectionState.collect { state ->
                     stateFlow.value = state
@@ -254,15 +260,16 @@ class BluetoothConnectionManager @Inject constructor(
                 if (result.isFailure) {
                     Log.w(TAG, "Connection to ${peer.displayName} failed: ${result.exceptionOrNull()?.message}")
                     activeConnections.remove(peer.deviceId)
+                } else {
+                    listenForFrames(peerConnection)
                 }
             }
 
             connectionJobs[peer.deviceId] = connectJob
 
-            // Await completion or return result
             return try {
                 connectJob.join()
-                stateObservationJob.cancel() // Don't leak temporary job; main state is already set
+                stateObservationJob.cancel()
                 if (peerConnection.isConnected) {
                     Result.success(Unit)
                 } else {
@@ -283,6 +290,42 @@ class BluetoothConnectionManager @Inject constructor(
             } finally {
                 connectionJobs.remove(peer.deviceId)
             }
+        }
+    }
+
+    private fun listenForFrames(peerConnection: BluetoothPeerConnection) {
+        scope.launch {
+            peerConnection.incomingFrames.collect { frameBytes ->
+                try {
+                    val jsonString = String(frameBytes, Charsets.UTF_8)
+                    val envelope = json.decodeFromString(MessageEnvelope.serializer(), jsonString)
+                    if (MessageEnvelope.isValid(envelope)) {
+                        Log.d(TAG, "Received valid envelope [${envelope.messageType}:${envelope.messageId}] from ${peerConnection.peerId}")
+                        _incomingEnvelopes.emit(envelope)
+                    } else {
+                        Log.w(TAG, "Rejected malformed envelope from ${peerConnection.peerId}")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to decode incoming envelope from ${peerConnection.peerId}: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Serializes and transmits a [MessageEnvelope] across the active RFCOMM connection for [peerId].
+     */
+    suspend fun sendEnvelope(peerId: String, envelope: MessageEnvelope): Result<Unit> {
+        val activeConn = activeConnections[peerId]
+            ?: return Result.failure(IllegalStateException("No active Bluetooth connection to peer $peerId"))
+
+        return try {
+            val jsonString = json.encodeToString(MessageEnvelope.serializer(), envelope)
+            val bytes = jsonString.toByteArray(Charsets.UTF_8)
+            activeConn.sendFrame(bytes)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send envelope to $peerId", e)
+            Result.failure(e)
         }
     }
 
