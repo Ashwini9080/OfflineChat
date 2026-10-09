@@ -68,6 +68,8 @@ class BluetoothDiscovery @Inject constructor(
     private var isReceiverRegistered = false
     private var advertiseCallback: AdvertiseCallback? = null
     private var scanCallback: ScanCallback? = null
+    private var currentLocalDisplayName: String = ""
+    private var currentLocalDeviceId: String = ""
 
     // ── Classic Bluetooth BroadcastReceiver ──────────────────────────────────
     private val discoveryReceiver = object : BroadcastReceiver() {

@@ -7,6 +7,7 @@ import com.offlinechat.domain.model.MessageStatus
 import com.offlinechat.domain.repository.ConversationRepository
 import com.offlinechat.domain.repository.MessageRepository
 import com.offlinechat.domain.usecase.ReceiveMessageUseCase
+import com.offlinechat.security.MessageSecurity
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -26,13 +27,15 @@ class BluetoothMessagingIntegrationTest {
     private val json = Json { ignoreUnknownKeys = true }
     private lateinit var messageRepository: MessageRepository
     private lateinit var conversationRepository: ConversationRepository
+    private lateinit var messageSecurity: MessageSecurity
     private lateinit var receiveMessageUseCase: ReceiveMessageUseCase
 
     @Before
     fun setUp() {
         messageRepository = mockk(relaxed = true)
         conversationRepository = mockk(relaxed = true)
-        receiveMessageUseCase = ReceiveMessageUseCase(messageRepository, conversationRepository)
+        messageSecurity = mockk(relaxed = true)
+        receiveMessageUseCase = ReceiveMessageUseCase(messageRepository, conversationRepository, messageSecurity)
     }
 
     @Test

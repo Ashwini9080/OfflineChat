@@ -7,8 +7,10 @@ import com.offlinechat.domain.model.MessageStatus
 import com.offlinechat.domain.repository.ConversationRepository
 import com.offlinechat.domain.repository.MessageRepository
 import com.offlinechat.domain.repository.PeerRepository
+import com.offlinechat.domain.repository.PreferencesRepository
 import com.offlinechat.domain.usecase.ReceiveMessageUseCase
 import com.offlinechat.security.IdentityManager
+import com.offlinechat.security.MessageSecurity
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -30,6 +32,8 @@ class MessageSyncEngineTest {
     private val conversationRepository = mockk<ConversationRepository>(relaxed = true)
     private val peerRepository = mockk<PeerRepository>(relaxed = true)
     private val identityManager = mockk<IdentityManager>(relaxed = true)
+    private val messageSecurity = mockk<MessageSecurity>(relaxed = true)
+    private val preferencesRepository = mockk<PreferencesRepository>(relaxed = true)
 
     private val incomingEnvelopes = MutableSharedFlow<MessageEnvelope>(extraBufferCapacity = 64)
 
@@ -47,7 +51,9 @@ class MessageSyncEngineTest {
             messageRepository = messageRepository,
             conversationRepository = conversationRepository,
             peerRepository = peerRepository,
-            identityManager = identityManager
+            identityManager = identityManager,
+            messageSecurity = messageSecurity,
+            preferencesRepository = preferencesRepository
         )
     }
 

@@ -148,7 +148,7 @@ fun PeerItem(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "Status: Connecting...",
+                                    text = "Connecting... (Accept on other phone if asked)",
                                     color = AccentCyan,
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.SemiBold
@@ -172,8 +172,9 @@ fun PeerItem(
                             )
                         }
                         connectionState is PeerConnectionState.ConnectionFailed -> {
+                            val reason = (connectionState as PeerConnectionState.ConnectionFailed).reason
                             Text(
-                                text = "Status: Connection Failed",
+                                text = if (reason.isNotBlank()) "Failed: $reason" else "Status: Connection Failed",
                                 color = AccentRose,
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.SemiBold

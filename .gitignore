@@ -2,6 +2,8 @@
 .gradle/
 build/
 **/build/
+*.apk
+.artifacts/
 
 # ── Android Studio / IntelliJ IDEA / VSCode ────────────────────────
 .idea/

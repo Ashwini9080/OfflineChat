@@ -21,6 +21,9 @@ class HandshakeFramingTest {
             deviceId = "test_dev_123",
             displayName = "Alice's Device",
             publicKeyBase64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE12345",
+            ephemeralPublicKeyBase64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE67890",
+            signatureBase64 = "MEYCIQCfakeSig123",
+            identityFingerprint = "AA:BB:CC:DD",
             timestamp = 1700000000L
         )
 
@@ -30,6 +33,9 @@ class HandshakeFramingTest {
         assertEquals("test_dev_123", deserialized.deviceId)
         assertEquals("Alice's Device", deserialized.displayName)
         assertEquals("MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE12345", deserialized.publicKeyBase64)
+        assertEquals("MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE67890", deserialized.ephemeralPublicKeyBase64)
+        assertEquals("MEYCIQCfakeSig123", deserialized.signatureBase64)
+        assertEquals("AA:BB:CC:DD", deserialized.identityFingerprint)
         assertEquals(1700000000L, deserialized.timestamp)
     }
 

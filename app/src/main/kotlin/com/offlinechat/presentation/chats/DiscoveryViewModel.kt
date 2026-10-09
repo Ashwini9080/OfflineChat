@@ -270,6 +270,7 @@ class DiscoveryViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
+            connectionManager.startServerListener()
             val result = discoverPeersUseCase.startDiscovery(localDisplayName, localDeviceId)
             if (result.isFailure) {
                 _uiState.value = _uiState.value.copy(
@@ -288,6 +289,7 @@ class DiscoveryViewModel @Inject constructor(
 
     fun onBluetoothEnabled() {
         _uiState.value = _uiState.value.copy(isBluetoothDisabled = false)
+        connectionManager.startServerListener()
         startScan()
     }
 
@@ -302,6 +304,7 @@ class DiscoveryViewModel @Inject constructor(
             missingPermissions = emptyList(),
             isPermissionPermanentlyDenied = false
         )
+        connectionManager.startServerListener()
         startScan()
     }
 

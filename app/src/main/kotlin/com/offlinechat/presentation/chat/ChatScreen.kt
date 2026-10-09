@@ -165,7 +165,8 @@ fun ChatScreen(
                                     is PeerConnectionState.ConnectionFailed, is PeerConnectionState.Failed,
                                     is PeerConnectionState.ConnectionRejected, is PeerConnectionState.ConnectionTimeout,
                                     is PeerConnectionState.ConnectionLost -> AccentRose
-                                    is PeerConnectionState.BluetoothDisabled, is PeerConnectionState.PermissionRevoked -> Color(0xFFF59E0B)
+                                    is PeerConnectionState.BluetoothDisabled, is PeerConnectionState.WifiDisabled, is PeerConnectionState.PermissionRevoked -> Color(0xFFF59E0B)
+                                    is PeerConnectionState.PeerUnavailable -> TextMuted
                                     is PeerConnectionState.Idle, is PeerConnectionState.Disconnected -> TextMuted
                                 }
 
@@ -179,6 +180,8 @@ fun ChatScreen(
                                     is PeerConnectionState.ConnectionTimeout -> "Connection Timeout"
                                     is PeerConnectionState.ConnectionLost -> "Connection Lost"
                                     is PeerConnectionState.BluetoothDisabled -> "Bluetooth Disabled"
+                                    is PeerConnectionState.WifiDisabled -> "Wi-Fi Disabled"
+                                    is PeerConnectionState.PeerUnavailable -> "Peer Unavailable"
                                     is PeerConnectionState.PermissionRevoked -> "Permission Revoked"
                                     is PeerConnectionState.Failed -> "Link failed"
                                     is PeerConnectionState.Idle, is PeerConnectionState.Disconnected -> "Disconnected"

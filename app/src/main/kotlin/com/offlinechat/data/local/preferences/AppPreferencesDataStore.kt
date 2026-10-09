@@ -28,7 +28,16 @@ class AppPreferencesDataStore @Inject constructor(
         private val KEY_AUTO_DISCOVERY = booleanPreferencesKey("auto_discovery_enabled")
         private val KEY_PREFERRED_TRANSPORT = stringPreferencesKey("preferred_transport")
         private val KEY_DARK_MODE = booleanPreferencesKey("dark_mode_enabled")
+        private val KEY_UPDATE_SERVER_URL = stringPreferencesKey("update_server_url")
     }
+
+    val updateServerUrl: Flow<String> = context.dataStore.data
+        .catch { exception ->
+            if (exception is IOException) emit(emptyPreferences()) else throw exception
+        }
+        .map { prefs ->
+            prefs[KEY_UPDATE_SERVER_URL] ?: "http://10.33.160.61:8080"
+        }
 
     val displayName: Flow<String> = context.dataStore.data
         .catch { exception ->
@@ -62,6 +71,12 @@ class AppPreferencesDataStore @Inject constructor(
         .map { prefs ->
             prefs[KEY_DARK_MODE] ?: true
         }
+
+    suspend fun setUpdateServerUrl(url: String) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_UPDATE_SERVER_URL] = url
+        }
+    }
 
     suspend fun setDisplayName(name: String) {
         context.dataStore.edit { prefs ->

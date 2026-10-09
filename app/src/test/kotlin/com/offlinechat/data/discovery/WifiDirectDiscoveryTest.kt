@@ -20,6 +20,7 @@ class WifiDirectDiscoveryTest {
     private lateinit var permissionHelper: WifiDirectPermissionHelper
     private lateinit var p2pManager: WifiP2pManager
     private lateinit var channel: WifiP2pManager.Channel
+    private lateinit var deviceMapper: WifiDirectDeviceMapper
     private lateinit var discovery: WifiDirectDiscovery
 
     @Before
@@ -28,11 +29,12 @@ class WifiDirectDiscoveryTest {
         permissionHelper = mockk(relaxed = true)
         p2pManager = mockk(relaxed = true)
         channel = mockk(relaxed = true)
+        deviceMapper = WifiDirectDeviceMapper()
 
         every { context.getSystemService(Context.WIFI_P2P_SERVICE) } returns p2pManager
         every { p2pManager.initialize(any(), any(), any()) } returns channel
 
-        discovery = WifiDirectDiscovery(context, permissionHelper)
+        discovery = WifiDirectDiscovery(context, permissionHelper, deviceMapper)
     }
 
     @Test
@@ -93,11 +95,11 @@ class WifiDirectDiscoveryTest {
     }
 
     @Test
-    fun `stopDiscovery stops peer discovery and marks status complete`() = runTest {
+    fun `stopDiscovery stops peer discovery and marks status cancelled`() = runTest {
         discovery.stopDiscovery()
 
         verify { p2pManager.stopPeerDiscovery(any(), any()) }
-        assertEquals(DiscoveryStatus.DiscoveryComplete, discovery.discoveryStatus.value)
+        assertEquals(DiscoveryStatus.DiscoveryCancelled, discovery.discoveryStatus.value)
         assertFalse(discovery.isDiscovering.value)
     }
 }

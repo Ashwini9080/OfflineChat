@@ -23,6 +23,7 @@ import java.util.Base64
 class MessageSecurityTest {
 
     private lateinit var keystoreManager: KeystoreManager
+    private lateinit var identityManager: IdentityManager
     private lateinit var peerRepository: PeerRepository
     private lateinit var sessionCrypto: SessionCrypto
     private lateinit var messageSecurity: MessageSecurityImpl
@@ -63,8 +64,11 @@ class MessageSecurityTest {
             }
         }
 
+        identityManager = IdentityManager(keystoreManager)
+
         messageSecurity = MessageSecurityImpl(
             keystoreManager = keystoreManager,
+            identityManager = identityManager,
             sessionCrypto = sessionCrypto,
             peerRepository = peerRepository
         )
@@ -90,22 +94,21 @@ class MessageSecurityTest {
     }
 
     @Test
-    fun `initiateHandshake generates valid signed payload with ephemeral key`() {
-        val peerId = "remote_peer_123"
-        val handshake = messageSecurity.initiateHandshake(peerId)
+    fun `createHandshakePayload generates valid signed payload with ephemeral key`() {
+        val handshake = messageSecurity.createHandshakePayload("Local Device")
 
         assertNotNull(handshake)
-        assertEquals(1, handshake.protocolVersion)
-        assertEquals("HANDSHAKE_INIT", handshake.type)
+        assertEquals("Local Device", handshake.displayName)
+        assertNotNull(handshake.deviceId)
         assertNotNull(handshake.ephemeralPublicKeyBase64)
-        assertNotNull(handshake.identityPublicKeyBase64)
+        assertNotNull(handshake.publicKeyBase64)
         assertNotNull(handshake.signatureBase64)
         assertNotNull(handshake.identityFingerprint)
     }
 
     @Test
     fun `processHandshake establishes session and derives identical symmetric Safety Number`() = runTest {
-        val peerId = "remote_peer_456"
+        val peerId = IdentityManager.deriveDeviceId(remoteKeyPair.public.encoded)
         val peer = Peer(
             deviceId = peerId,
             displayName = "Remote Device",
@@ -116,7 +119,10 @@ class MessageSecurityTest {
 
         // Remote peer initiates handshake
         val remoteEphemeralKeyPair = kpg.generateKeyPair()
-        val dataToSign = remoteEphemeralKeyPair.public.encoded
+        val pubKeyB64 = Base64.getEncoder().encodeToString(remoteKeyPair.public.encoded)
+        val ephemeralB64 = Base64.getEncoder().encodeToString(remoteEphemeralKeyPair.public.encoded)
+        val timestamp = System.currentTimeMillis()
+        val dataToSign = "$peerId|$pubKeyB64|$ephemeralB64|$timestamp".toByteArray(Charsets.UTF_8)
         val sig = java.security.Signature.getInstance("SHA256withECDSA").apply {
             initSign(remoteKeyPair.private)
             update(dataToSign)
@@ -124,66 +130,57 @@ class MessageSecurityTest {
         val remoteSig = sig.sign()
 
         val incomingHandshake = HandshakePayload(
-            protocolVersion = 1,
-            type = "HANDSHAKE_INIT",
-            identityPublicKeyBase64 = Base64.getEncoder().encodeToString(remoteKeyPair.public.encoded),
-            ephemeralPublicKeyBase64 = Base64.getEncoder().encodeToString(remoteEphemeralKeyPair.public.encoded),
+            deviceId = peerId,
+            displayName = "Remote Device",
+            publicKeyBase64 = pubKeyB64,
+            ephemeralPublicKeyBase64 = ephemeralB64,
             signatureBase64 = Base64.getEncoder().encodeToString(remoteSig),
-            identityFingerprint = IdentityManager.fingerprint(remoteKeyPair.public.encoded)
+            identityFingerprint = IdentityManager.computeFingerprint(remoteKeyPair.public.encoded),
+            timestamp = timestamp
         )
 
-        val responseHandshake = messageSecurity.processHandshake(incomingHandshake, peerId)
-        assertNotNull(responseHandshake)
-        assertEquals("HANDSHAKE_RESP", responseHandshake.type)
+        val result = messageSecurity.processHandshake(incomingHandshake)
+        assertNotNull(result)
+        assertEquals(peerId, result.peerId)
 
         // Verify Safety Number exists and is formatted as "### ###"
         val safetyNumber = messageSecurity.getSafetyNumber(peerId)
         assertNotNull(safetyNumber)
         assertTrue(safetyNumber!!.matches(Regex("\\d{3} \\d{3}")))
 
-        coVerify { peerRepository.updateTrustState(peerId, PeerTrustState.VERIFICATION_REQUIRED, safetyNumber) }
+        coVerify { peerRepository.saveOrUpdatePeer(match { it.deviceId == peerId && it.safetyNumber == safetyNumber }) }
     }
 
     @Test(expected = SecurityException::class)
-    fun `processHandshake detects identity change and sets trust state to REVOKED`() = runTest {
-        val peerId = "known_trusted_peer"
-        // Peer was previously stored with remoteKeyPair
-        val existingPeer = Peer(
-            deviceId = peerId,
-            displayName = "Rahul Phone",
-            publicKeyBytes = remoteKeyPair.public.encoded,
-            trustState = PeerTrustState.VERIFIED
-        )
-        coEvery { peerRepository.getPeerById(peerId) } returns existingPeer
+    fun `processHandshake detects device identity mismatch and throws SecurityException`() = runTest {
+        val victimPeerId = IdentityManager.deriveDeviceId(remoteKeyPair.public.encoded)
 
-        // Attacker attempts key replacement using attackerKeyPair
+        // Attacker attempts to spoof victimPeerId with attacker's keypair
         val attackerEphemeral = kpg.generateKeyPair()
+        val pubKeyB64 = Base64.getEncoder().encodeToString(attackerKeyPair.public.encoded)
+        val ephemeralB64 = Base64.getEncoder().encodeToString(attackerEphemeral.public.encoded)
+        val timestamp = System.currentTimeMillis()
+        val dataToSign = "$victimPeerId|$pubKeyB64|$ephemeralB64|$timestamp".toByteArray(Charsets.UTF_8)
         val sig = java.security.Signature.getInstance("SHA256withECDSA").apply {
             initSign(attackerKeyPair.private)
-            update(attackerEphemeral.public.encoded)
+            update(dataToSign)
         }
-        val attackerSig = sig.sign()
-
         val attackHandshake = HandshakePayload(
-            protocolVersion = 1,
-            type = "HANDSHAKE_INIT",
-            identityPublicKeyBase64 = Base64.getEncoder().encodeToString(attackerKeyPair.public.encoded),
-            ephemeralPublicKeyBase64 = Base64.getEncoder().encodeToString(attackerEphemeral.public.encoded),
-            signatureBase64 = Base64.getEncoder().encodeToString(attackerSig),
-            identityFingerprint = IdentityManager.fingerprint(attackerKeyPair.public.encoded)
+            deviceId = victimPeerId,
+            displayName = "Attacker Spoof",
+            publicKeyBase64 = pubKeyB64,
+            ephemeralPublicKeyBase64 = ephemeralB64,
+            signatureBase64 = Base64.getEncoder().encodeToString(sig.sign()),
+            identityFingerprint = IdentityManager.computeFingerprint(attackerKeyPair.public.encoded),
+            timestamp = timestamp
         )
 
-        try {
-            messageSecurity.processHandshake(attackHandshake, peerId)
-        } finally {
-            // Verify that identity mismatch immediately transitions state to REVOKED
-            coVerify { peerRepository.updateTrustState(peerId, PeerTrustState.REVOKED, null) }
-        }
+        messageSecurity.processHandshake(attackHandshake)
     }
 
     @Test
     fun `AES-256-GCM message encryption and decryption roundtrip succeeds with unique nonces`() = runTest {
-        val peerId = "peer_device_xyz"
+        val peerId = IdentityManager.deriveDeviceId(remoteKeyPair.public.encoded)
         val peer = Peer(
             deviceId = peerId,
             displayName = "Remote Peer",
@@ -194,19 +191,24 @@ class MessageSecurityTest {
 
         // Set up active session
         val remoteEphemeralKeyPair = kpg.generateKeyPair()
+        val pubKeyB64 = Base64.getEncoder().encodeToString(remoteKeyPair.public.encoded)
+        val ephemeralB64 = Base64.getEncoder().encodeToString(remoteEphemeralKeyPair.public.encoded)
+        val timestamp = System.currentTimeMillis()
+        val dataToSign = "$peerId|$pubKeyB64|$ephemeralB64|$timestamp".toByteArray(Charsets.UTF_8)
         val sig = java.security.Signature.getInstance("SHA256withECDSA").apply {
             initSign(remoteKeyPair.private)
-            update(remoteEphemeralKeyPair.public.encoded)
+            update(dataToSign)
         }
         val handshake = HandshakePayload(
-            protocolVersion = 1,
-            type = "HANDSHAKE_INIT",
-            identityPublicKeyBase64 = Base64.getEncoder().encodeToString(remoteKeyPair.public.encoded),
-            ephemeralPublicKeyBase64 = Base64.getEncoder().encodeToString(remoteEphemeralKeyPair.public.encoded),
+            deviceId = peerId,
+            displayName = "Remote Peer",
+            publicKeyBase64 = pubKeyB64,
+            ephemeralPublicKeyBase64 = ephemeralB64,
             signatureBase64 = Base64.getEncoder().encodeToString(sig.sign()),
-            identityFingerprint = IdentityManager.fingerprint(remoteKeyPair.public.encoded)
+            identityFingerprint = IdentityManager.computeFingerprint(remoteKeyPair.public.encoded),
+            timestamp = timestamp
         )
-        messageSecurity.processHandshake(handshake, peerId)
+        messageSecurity.processHandshake(handshake)
 
         val plaintext1 = "Message number 1 over Bluetooth E2EE".toByteArray(Charsets.UTF_8)
         val encrypted1 = messageSecurity.encryptMessage(plaintext1, peerId, "msg-001")
@@ -235,7 +237,7 @@ class MessageSecurityTest {
 
     @Test(expected = SecurityException::class)
     fun `tampered ciphertext in encrypted message throws SecurityException`() = runTest {
-        val peerId = "peer_device_xyz"
+        val peerId = IdentityManager.deriveDeviceId(remoteKeyPair.public.encoded)
         val peer = Peer(
             deviceId = peerId,
             displayName = "Remote Peer",
@@ -245,19 +247,24 @@ class MessageSecurityTest {
         coEvery { peerRepository.getPeerById(peerId) } returns peer
 
         val remoteEphemeralKeyPair = kpg.generateKeyPair()
+        val pubKeyB64 = Base64.getEncoder().encodeToString(remoteKeyPair.public.encoded)
+        val ephemeralB64 = Base64.getEncoder().encodeToString(remoteEphemeralKeyPair.public.encoded)
+        val timestamp = System.currentTimeMillis()
+        val dataToSign = "$peerId|$pubKeyB64|$ephemeralB64|$timestamp".toByteArray(Charsets.UTF_8)
         val sig = java.security.Signature.getInstance("SHA256withECDSA").apply {
             initSign(remoteKeyPair.private)
-            update(remoteEphemeralKeyPair.public.encoded)
+            update(dataToSign)
         }
         val handshake = HandshakePayload(
-            protocolVersion = 1,
-            type = "HANDSHAKE_INIT",
-            identityPublicKeyBase64 = Base64.getEncoder().encodeToString(remoteKeyPair.public.encoded),
-            ephemeralPublicKeyBase64 = Base64.getEncoder().encodeToString(remoteEphemeralKeyPair.public.encoded),
+            deviceId = peerId,
+            displayName = "Remote Peer",
+            publicKeyBase64 = pubKeyB64,
+            ephemeralPublicKeyBase64 = ephemeralB64,
             signatureBase64 = Base64.getEncoder().encodeToString(sig.sign()),
-            identityFingerprint = IdentityManager.fingerprint(remoteKeyPair.public.encoded)
+            identityFingerprint = IdentityManager.computeFingerprint(remoteKeyPair.public.encoded),
+            timestamp = timestamp
         )
-        messageSecurity.processHandshake(handshake, peerId)
+        messageSecurity.processHandshake(handshake)
 
         val plaintext = "Top secret data".toByteArray(Charsets.UTF_8)
         val encrypted = messageSecurity.encryptMessage(plaintext, peerId, "msg-003")
@@ -272,7 +279,7 @@ class MessageSecurityTest {
 
     @Test(expected = SecurityException::class)
     fun `tampered messageId in Associated Data fails AEAD authentication`() = runTest {
-        val peerId = "peer_device_xyz"
+        val peerId = IdentityManager.deriveDeviceId(remoteKeyPair.public.encoded)
         val peer = Peer(
             deviceId = peerId,
             displayName = "Remote Peer",
@@ -282,19 +289,24 @@ class MessageSecurityTest {
         coEvery { peerRepository.getPeerById(peerId) } returns peer
 
         val remoteEphemeralKeyPair = kpg.generateKeyPair()
+        val pubKeyB64 = Base64.getEncoder().encodeToString(remoteKeyPair.public.encoded)
+        val ephemeralB64 = Base64.getEncoder().encodeToString(remoteEphemeralKeyPair.public.encoded)
+        val timestamp = System.currentTimeMillis()
+        val dataToSign = "$peerId|$pubKeyB64|$ephemeralB64|$timestamp".toByteArray(Charsets.UTF_8)
         val sig = java.security.Signature.getInstance("SHA256withECDSA").apply {
             initSign(remoteKeyPair.private)
-            update(remoteEphemeralKeyPair.public.encoded)
+            update(dataToSign)
         }
         val handshake = HandshakePayload(
-            protocolVersion = 1,
-            type = "HANDSHAKE_INIT",
-            identityPublicKeyBase64 = Base64.getEncoder().encodeToString(remoteKeyPair.public.encoded),
-            ephemeralPublicKeyBase64 = Base64.getEncoder().encodeToString(remoteEphemeralKeyPair.public.encoded),
+            deviceId = peerId,
+            displayName = "Remote Peer",
+            publicKeyBase64 = pubKeyB64,
+            ephemeralPublicKeyBase64 = ephemeralB64,
             signatureBase64 = Base64.getEncoder().encodeToString(sig.sign()),
-            identityFingerprint = IdentityManager.fingerprint(remoteKeyPair.public.encoded)
+            identityFingerprint = IdentityManager.computeFingerprint(remoteKeyPair.public.encoded),
+            timestamp = timestamp
         )
-        messageSecurity.processHandshake(handshake, peerId)
+        messageSecurity.processHandshake(handshake)
 
         val plaintext = "Top secret data".toByteArray(Charsets.UTF_8)
         val encrypted = messageSecurity.encryptMessage(plaintext, peerId, "msg-004")
@@ -303,3 +315,4 @@ class MessageSecurityTest {
         messageSecurity.decryptMessage(encrypted, peerId, "msg-999-tampered-id")
     }
 }
+

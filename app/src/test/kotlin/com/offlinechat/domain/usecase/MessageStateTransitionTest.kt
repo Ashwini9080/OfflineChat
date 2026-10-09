@@ -4,8 +4,10 @@ import com.offlinechat.data.transport.MessageSyncEngine
 import com.offlinechat.data.transport.MessageTransport
 import com.offlinechat.domain.model.Message
 import com.offlinechat.domain.model.MessageStatus
+import com.offlinechat.domain.model.PeerTrustState
 import com.offlinechat.domain.repository.ConversationRepository
 import com.offlinechat.domain.repository.MessageRepository
+import com.offlinechat.security.MessageSecurity
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -22,6 +24,7 @@ class MessageStateTransitionTest {
     private lateinit var conversationRepository: ConversationRepository
     private lateinit var transport: MessageTransport
     private lateinit var syncEngine: MessageSyncEngine
+    private lateinit var messageSecurity: MessageSecurity
     private lateinit var sendMessageUseCase: SendMessageUseCase
 
     @Before
@@ -30,11 +33,15 @@ class MessageStateTransitionTest {
         conversationRepository = mockk(relaxed = true)
         transport = mockk(relaxed = true)
         syncEngine = mockk(relaxed = true)
+        messageSecurity = mockk(relaxed = true)
+        coEvery { messageSecurity.getPeerTrustState(any()) } returns PeerTrustState.CONNECTED
+
         sendMessageUseCase = SendMessageUseCase(
             messageRepository = messageRepository,
             conversationRepository = conversationRepository,
             transport = transport,
-            syncEngine = syncEngine
+            syncEngine = syncEngine,
+            messageSecurity = messageSecurity
         )
     }
 

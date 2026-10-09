@@ -74,8 +74,11 @@ class WifiDirectPeerConnection(
         val deferredResult = CompletableDeferred<Result<Unit>>()
         pendingConnectResult = deferredResult
 
+        val targetMac = formatMacAddress(peer.deviceId)
+        Log.d(TAG, "Connecting to target MAC: $targetMac (from peerId: ${peer.deviceId})")
+
         val config = WifiP2pConfig().apply {
-            deviceAddress = peer.deviceId
+            deviceAddress = targetMac
             wps.setup = WpsInfo.PBC
         }
 
@@ -219,5 +222,14 @@ class WifiDirectPeerConnection(
             WifiP2pManager.NO_SERVICE_REQUESTS -> "No Service Requests"
             else -> "Error code $reasonCode"
         }
+    }
+
+    private fun formatMacAddress(address: String): String {
+        val clean = address.trim()
+        if (clean.contains(":")) return clean
+        if (clean.length == 12) {
+            return clean.chunked(2).joinToString(":")
+        }
+        return clean
     }
 }

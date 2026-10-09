@@ -225,63 +225,54 @@ class BluetoothPeerConnection(
         address: String,
         displayName: String
     ): Result<Unit> = withContext(ioDispatcher) {
-        val remoteDevice = adapter.getRemoteDevice(address)
+        val remoteDevice = try {
+            adapter.getRemoteDevice(address)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get remote device for address: $address", e)
+            return@withContext Result.failure(e)
+        }
         Log.d(TAG, "Target device: ${remoteDevice.name ?: displayName}, bondState: ${remoteDevice.bondState}")
 
         // Cancel active inquiry scan to avoid radio congestion and packet collisions
         if (adapter.isDiscovering) {
             Log.d(TAG, "Cancelling active discovery inquiry prior to socket connect")
-            adapter.cancelDiscovery()
+            try { adapter.cancelDiscovery() } catch (_: Exception) {}
         }
 
-        val socket = createSocketWithFallback(remoteDevice)
-            ?: return@withContext Result.failure(IOException("Failed to create RFCOMM socket to $address"))
+        val strategies: List<Pair<String, () -> BluetoothSocket>> = listOf(
+            "Insecure SPP" to { remoteDevice.createInsecureRfcommSocketToServiceRecord(SPP_UUID) },
+            "Secure SPP" to { remoteDevice.createRfcommSocketToServiceRecord(SPP_UUID) },
+            "Insecure APP_UUID" to { remoteDevice.createInsecureRfcommSocketToServiceRecord(APP_UUID) },
+            "Secure APP_UUID" to { remoteDevice.createRfcommSocketToServiceRecord(APP_UUID) },
+            "Reflection Channel 1" to {
+                val method = remoteDevice.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                method.invoke(remoteDevice, 1) as BluetoothSocket
+            }
+        )
 
-        Log.d(TAG, "Connecting RFCOMM socket to $address...")
-        socket.connect()
-        Log.i(TAG, "RFCOMM socket connected successfully to $displayName [$address]")
+        var lastException: Exception? = null
+        for ((name, factory) in strategies) {
+            var candidateSocket: BluetoothSocket? = null
+            try {
+                Log.d(TAG, "Attempting Bluetooth connect via strategy '$name' to $address...")
+                candidateSocket = factory()
+                candidateSocket.connect()
+                Log.i(TAG, "RFCOMM socket connected successfully via '$name' to $displayName [$address]")
 
-        activeSocket = socket
-        _connectionState.value = PeerConnectionState.Connected
+                activeSocket = candidateSocket
+                _connectionState.value = PeerConnectionState.Connected
 
-        // Launch frame reader loop
-        startFrameReader(socket, displayName)
-
-        Result.success(Unit)
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun createSocketWithFallback(device: BluetoothDevice): BluetoothSocket? {
-        // Attempt 1: Insecure SPP
-        try {
-            return device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
-        } catch (e: Exception) {
-            Log.w(TAG, "createInsecureRfcommSocketToServiceRecord failed, trying secure", e)
+                // Launch frame reader loop
+                startFrameReader(candidateSocket, displayName)
+                return@withContext Result.success(Unit)
+            } catch (e: Exception) {
+                Log.w(TAG, "Connection via '$name' to $address failed: ${e.message}")
+                lastException = e
+                try { candidateSocket?.close() } catch (_: Exception) {}
+            }
         }
 
-        // Attempt 2: Secure SPP
-        try {
-            return device.createRfcommSocketToServiceRecord(SPP_UUID)
-        } catch (e: Exception) {
-            Log.w(TAG, "createRfcommSocketToServiceRecord failed, trying APP_UUID", e)
-        }
-
-        // Attempt 3: APP_UUID Insecure
-        try {
-            return device.createInsecureRfcommSocketToServiceRecord(APP_UUID)
-        } catch (e: Exception) {
-            Log.w(TAG, "createInsecureRfcommSocketToServiceRecord(APP_UUID) failed, trying reflection", e)
-        }
-
-        // Attempt 4: Direct Channel 1 reflection
-        try {
-            val method = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
-            return method.invoke(device, 1) as BluetoothSocket
-        } catch (e: Exception) {
-            Log.e(TAG, "Reflection createRfcommSocket failed", e)
-        }
-
-        return null
+        Result.failure(lastException ?: IOException("Failed to establish Bluetooth connection to $address"))
     }
 
     /**

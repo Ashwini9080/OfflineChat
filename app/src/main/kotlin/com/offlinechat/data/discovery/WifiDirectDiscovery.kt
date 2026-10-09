@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pDeviceList
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
@@ -19,25 +18,35 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Real Wi-Fi Direct device discovery implementation utilizing Android's native [WifiP2pManager].
+ * Real Wi-Fi Direct device discovery using Android's native [WifiP2pManager].
  *
- * Implements the required lifecycle:
- * IDLE -> CHECKING_WIFI -> CHECKING_PERMISSION -> STARTING_DISCOVERY -> DISCOVERING -> PEERS_FOUND -> DISCOVERY_COMPLETE
+ * ## Discovery lifecycle
+ * ```
+ * Idle → CheckingWifi → CheckingPermissions → StartingDiscovery → Discovering → DeviceFound → DiscoveryComplete
+ * ```
+ * Failure states: WifiDisabled, WifiDirectUnsupported, PermissionRequired, DiscoveryFailed, DiscoveryCancelled
  *
- * Translates Android [WifiP2pDevice] framework instances into clean [Peer] domain objects with
- * [TransportType.WIFI_DIRECT], completely isolating hardware frameworks from upper layers.
+ * ## Identity contract
+ * Discovered [Peer] objects carry a temporary Wi-Fi MAC-based ID for routing only.
+ * Cryptographic identity is established later via the Phase 7 secure handshake.
+ *
+ * ## Lifecycle safety
+ * - The BroadcastReceiver is registered only when discovery is active (not at construction).
+ * - [AtomicBoolean] guards against duplicate registration.
+ * - [stopDiscovery] always unregisters the receiver and updates state.
  */
 @Singleton
 class WifiDirectDiscovery @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val permissionHelper: WifiDirectPermissionHelper
+    private val permissionHelper: WifiDirectPermissionHelper,
+    private val deviceMapper: WifiDirectDeviceMapper,
 ) : DeviceDiscovery {
 
     companion object {
@@ -46,33 +55,26 @@ class WifiDirectDiscovery @Inject constructor(
 
     override val transportType: TransportType = TransportType.WIFI_DIRECT
 
+    @Suppress("unused")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val p2pManager: WifiP2pManager? = context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
+
+    private val p2pManager: WifiP2pManager? =
+        context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
     private var channel: WifiP2pManager.Channel? = null
 
     private val _discoveredPeers = MutableStateFlow<List<Peer>>(emptyList())
-    override val discoveredPeers: Flow<List<Peer>> = _discoveredPeers.asStateFlow()
+    override val discoveredPeers: StateFlow<List<Peer>> = _discoveredPeers.asStateFlow()
 
     private val _discoveryStatus = MutableStateFlow<DiscoveryStatus>(DiscoveryStatus.Idle)
-    override val discoveryStatus: Flow<DiscoveryStatus> = _discoveryStatus.asStateFlow()
+    override val discoveryStatus: StateFlow<DiscoveryStatus> = _discoveryStatus.asStateFlow()
 
     private val _isDiscovering = MutableStateFlow(false)
-    override val isDiscovering: Flow<Boolean> = _isDiscovering.asStateFlow()
+    override val isDiscovering: StateFlow<Boolean> = _isDiscovering.asStateFlow()
 
+    // Guards against duplicate BroadcastReceiver registration
     private val isReceiverRegistered = AtomicBoolean(false)
 
-    init {
-        initializeChannel()
-    }
-
-    private fun initializeChannel() {
-        if (p2pManager != null && channel == null) {
-            channel = p2pManager.initialize(context, context.mainLooper) {
-                Log.w(TAG, "Wi-Fi P2P Channel disconnected. Re-initializing...")
-                channel = null
-            }
-        }
-    }
+    // ── BroadcastReceiver ─────────────────────────────────────────────────────
 
     private val p2pReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -80,7 +82,7 @@ class WifiDirectDiscovery @Inject constructor(
                 WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
                     val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
                     val isP2pEnabled = state == WifiP2pManager.WIFI_P2P_STATE_ENABLED
-                    Log.d(TAG, "WIFI_P2P_STATE_CHANGED_ACTION: isP2pEnabled=$isP2pEnabled")
+                    Log.d(TAG, "Wi-Fi P2P state changed: enabled=$isP2pEnabled")
                     if (!isP2pEnabled) {
                         _discoveryStatus.value = DiscoveryStatus.WifiDisabled
                         _isDiscovering.value = false
@@ -89,7 +91,7 @@ class WifiDirectDiscovery @Inject constructor(
                 }
 
                 WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
-                    Log.d(TAG, "WIFI_P2P_PEERS_CHANGED_ACTION received, requesting peers")
+                    Log.d(TAG, "WIFI_P2P_PEERS_CHANGED_ACTION received — requesting peer list")
                     requestPeers()
                 }
 
@@ -99,7 +101,7 @@ class WifiDirectDiscovery @Inject constructor(
                         WifiP2pManager.WIFI_P2P_DISCOVERY_STOPPED
                     )
                     val isRunning = discoveryState == WifiP2pManager.WIFI_P2P_DISCOVERY_STARTED
-                    Log.d(TAG, "WIFI_P2P_DISCOVERY_CHANGED_ACTION: isRunning=$isRunning")
+                    Log.d(TAG, "Discovery state changed: running=$isRunning")
                     _isDiscovering.value = isRunning
                     if (!isRunning && _discoveryStatus.value is DiscoveryStatus.Discovering) {
                         _discoveryStatus.value = DiscoveryStatus.DiscoveryComplete
@@ -109,9 +111,15 @@ class WifiDirectDiscovery @Inject constructor(
         }
     }
 
+    // ── Public API ────────────────────────────────────────────────────────────
+
     @SuppressLint("MissingPermission")
-    override suspend fun startDiscovery(localDisplayName: String, localDeviceId: String): Result<Unit> {
-        // 1. Check Wi-Fi Direct hardware capability
+    override suspend fun startDiscovery(
+        localDisplayName: String,
+        localDeviceId: String,
+    ): Result<Unit> {
+
+        // 1. Check hardware capability
         if (!permissionHelper.isWifiDirectSupported() || p2pManager == null) {
             Log.w(TAG, "Wi-Fi Direct is not supported on this hardware")
             _discoveryStatus.value = DiscoveryStatus.WifiDirectUnsupported
@@ -121,7 +129,7 @@ class WifiDirectDiscovery @Inject constructor(
         // 2. Check Wi-Fi enabled state
         _discoveryStatus.value = DiscoveryStatus.CheckingWifi
         if (!permissionHelper.isWifiEnabled()) {
-            Log.w(TAG, "Wi-Fi is turned off")
+            Log.w(TAG, "Wi-Fi is turned off — cannot start Wi-Fi Direct discovery")
             _discoveryStatus.value = DiscoveryStatus.WifiDisabled
             return Result.failure(IllegalStateException("Wi-Fi is turned off"))
         }
@@ -130,72 +138,98 @@ class WifiDirectDiscovery @Inject constructor(
         _discoveryStatus.value = DiscoveryStatus.CheckingPermissions
         if (!permissionHelper.hasRequiredPermissions()) {
             val missing = permissionHelper.getMissingPermissions()
-            Log.w(TAG, "Missing required Wi-Fi Direct permissions: $missing")
+            Log.w(TAG, "Missing Wi-Fi Direct permissions: $missing")
             _discoveryStatus.value = DiscoveryStatus.PermissionRequired(missing)
-            return Result.failure(SecurityException("Missing required Wi-Fi Direct permissions"))
+            return Result.failure(SecurityException("Missing required Wi-Fi Direct permissions: $missing"))
         }
 
+        // 4. Ensure the P2P channel is initialized
         initializeChannel()
         val ch = channel ?: run {
-            _discoveryStatus.value = DiscoveryStatus.DiscoveryFailed("Failed to initialize Wi-Fi P2P channel")
-            return Result.failure(IllegalStateException("Wi-Fi P2P channel initialization failed"))
+            val msg = "Wi-Fi P2P channel initialization failed"
+            Log.e(TAG, msg)
+            _discoveryStatus.value = DiscoveryStatus.DiscoveryFailed(msg)
+            return Result.failure(IllegalStateException(msg))
         }
 
-        // 4. Register BroadcastReceiver
+        // 5. Register BroadcastReceiver (only when active — not in init)
         registerReceiver()
 
         _discoveryStatus.value = DiscoveryStatus.StartingDiscovery
 
-        // 5. Initiate real native peer discovery
+        // 6. Start native Wi-Fi Direct peer discovery
         return try {
             p2pManager.discoverPeers(ch, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
-                    Log.i(TAG, "Wi-Fi Direct discoverPeers started successfully")
+                    Log.i(TAG, "discoverPeers() accepted by framework — discovery starting")
                     _isDiscovering.value = true
                     _discoveryStatus.value = DiscoveryStatus.Discovering
+                    // Request any already-known peers immediately
                     requestPeers()
                 }
 
                 override fun onFailure(reasonCode: Int) {
-                    val reason = formatReason(reasonCode)
-                    Log.w(TAG, "Wi-Fi Direct discoverPeers failed: $reason")
+                    val reason = formatFailureReason(reasonCode)
+                    Log.w(TAG, "discoverPeers() failed: $reason (code=$reasonCode)")
                     _isDiscovering.value = false
                     _discoveryStatus.value = DiscoveryStatus.DiscoveryFailed(reason)
+                    unregisterReceiver()
                 }
             })
             Result.success(Unit)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException during discoverPeers — permission revoked", e)
+            _isDiscovering.value = false
+            _discoveryStatus.value = DiscoveryStatus.PermissionRevoked
+            unregisterReceiver()
+            Result.failure(e)
         } catch (e: Exception) {
-            Log.e(TAG, "Exception starting Wi-Fi Direct peer discovery", e)
+            Log.e(TAG, "Unexpected exception starting Wi-Fi Direct discovery", e)
             _isDiscovering.value = false
             _discoveryStatus.value = DiscoveryStatus.DiscoveryFailed(e.message ?: "Unknown error")
+            unregisterReceiver()
             Result.failure(e)
         }
     }
 
     @SuppressLint("MissingPermission")
     override suspend fun stopDiscovery() {
-        Log.i(TAG, "Stopping Wi-Fi Direct peer discovery")
+        Log.i(TAG, "Stopping Wi-Fi Direct discovery")
         _isDiscovering.value = false
-        _discoveryStatus.value = DiscoveryStatus.DiscoveryComplete
 
-        val manager = p2pManager ?: return
-        val ch = channel ?: return
+        val manager = p2pManager
+        val ch = channel
 
-        try {
-            manager.stopPeerDiscovery(ch, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    Log.d(TAG, "stopPeerDiscovery succeeded")
-                }
-
-                override fun onFailure(reason: Int) {
-                    Log.d(TAG, "stopPeerDiscovery failed: ${formatReason(reason)}")
-                }
-            })
-        } catch (e: Exception) {
-            Log.w(TAG, "Error calling stopPeerDiscovery", e)
+        if (manager != null && ch != null) {
+            try {
+                manager.stopPeerDiscovery(ch, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() {
+                        Log.d(TAG, "stopPeerDiscovery() succeeded")
+                    }
+                    override fun onFailure(reason: Int) {
+                        Log.d(TAG, "stopPeerDiscovery() failed: ${formatFailureReason(reason)}")
+                    }
+                })
+            } catch (e: Exception) {
+                Log.w(TAG, "Exception calling stopPeerDiscovery", e)
+            }
         }
 
+        // Always update status and unregister — even if stopPeerDiscovery failed
+        _discoveryStatus.value = DiscoveryStatus.DiscoveryCancelled
         unregisterReceiver()
+    }
+
+    // ── Internal helpers ──────────────────────────────────────────────────────
+
+    private fun initializeChannel() {
+        if (p2pManager != null && channel == null) {
+            channel = p2pManager.initialize(context, context.mainLooper) {
+                // Framework called channelDisconnectedListener — re-initialize
+                Log.w(TAG, "Wi-Fi P2P channel disconnected. Clearing for re-initialization.")
+                channel = null
+            }
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -203,24 +237,21 @@ class WifiDirectDiscovery @Inject constructor(
         val manager = p2pManager ?: return
         val ch = channel ?: return
 
-        manager.requestPeers(ch) { peers: WifiP2pDeviceList? ->
-            val deviceList = peers?.deviceList ?: emptyList()
-            Log.d(TAG, "Discovered ${deviceList.size} Wi-Fi Direct peers")
+        try {
+            manager.requestPeers(ch) { peers: WifiP2pDeviceList? ->
+                val deviceList = peers?.deviceList ?: emptyList()
+                Log.d(TAG, "requestPeers() returned ${deviceList.size} devices")
 
-            val mapped = deviceList.map { device: WifiP2pDevice ->
-                Peer(
-                    deviceId = device.deviceAddress,
-                    displayName = device.deviceName?.ifBlank { "Wi-Fi Peer" } ?: "Wi-Fi Peer",
-                    bluetoothAddress = null,
-                    transportType = TransportType.WIFI_DIRECT,
-                    lastSeenAt = System.currentTimeMillis()
-                )
-            }.distinctBy { it.deviceId }
+                val mapped = deviceMapper.mapDeviceList(deviceList)
+                _discoveredPeers.value = mapped
 
-            _discoveredPeers.value = mapped
-            if (mapped.isNotEmpty()) {
-                _discoveryStatus.value = DiscoveryStatus.DeviceFound(mapped.size)
+                if (mapped.isNotEmpty()) {
+                    _discoveryStatus.value = DiscoveryStatus.DeviceFound(mapped.size)
+                }
             }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "SecurityException during requestPeers — permission may have been revoked", e)
+            _discoveryStatus.value = DiscoveryStatus.PermissionRevoked
         }
     }
 
@@ -232,10 +263,17 @@ class WifiDirectDiscovery @Inject constructor(
                 addAction(WifiP2pManager.WIFI_P2P_DISCOVERY_CHANGED_ACTION)
                 addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.registerReceiver(p2pReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                context.registerReceiver(p2pReceiver, filter)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    context.registerReceiver(p2pReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                } else {
+                    @Suppress("UnspecifiedRegisterReceiverFlag")
+                    context.registerReceiver(p2pReceiver, filter)
+                }
+                Log.d(TAG, "Wi-Fi Direct discovery receiver registered")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to register Wi-Fi Direct receiver", e)
+                isReceiverRegistered.set(false)
             }
         }
     }
@@ -244,19 +282,18 @@ class WifiDirectDiscovery @Inject constructor(
         if (isReceiverRegistered.compareAndSet(true, false)) {
             try {
                 context.unregisterReceiver(p2pReceiver)
+                Log.d(TAG, "Wi-Fi Direct discovery receiver unregistered")
             } catch (e: IllegalArgumentException) {
-                Log.d(TAG, "Receiver already unregistered")
+                Log.d(TAG, "Wi-Fi Direct receiver was already unregistered")
             }
         }
     }
 
-    private fun formatReason(reasonCode: Int): String {
-        return when (reasonCode) {
-            WifiP2pManager.ERROR -> "P2P System Error"
-            WifiP2pManager.P2P_UNSUPPORTED -> "Wi-Fi Direct Unsupported"
-            WifiP2pManager.BUSY -> "Framework Busy"
-            WifiP2pManager.NO_SERVICE_REQUESTS -> "No Service Requests"
-            else -> "Error code: $reasonCode"
-        }
+    private fun formatFailureReason(reasonCode: Int): String = when (reasonCode) {
+        WifiP2pManager.ERROR           -> "Internal P2P framework error"
+        WifiP2pManager.P2P_UNSUPPORTED -> "Wi-Fi Direct is not supported on this device"
+        WifiP2pManager.BUSY            -> "Wi-Fi Direct framework is busy — try again"
+        WifiP2pManager.NO_SERVICE_REQUESTS -> "No service requests registered"
+        else                           -> "Unknown error (code $reasonCode)"
     }
 }

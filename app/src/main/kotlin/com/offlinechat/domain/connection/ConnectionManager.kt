@@ -50,4 +50,9 @@ interface ConnectionManager {
      * Closes all active connections and cleans up background resources.
      */
     suspend fun disconnectAll()
+
+    /**
+     * Starts or ensures the server listener is active for incoming connections.
+     */
+    fun startServerListener() {}
 }

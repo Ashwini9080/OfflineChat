@@ -90,4 +90,8 @@ class UnifiedConnectionManager @Inject constructor(
         wifiDirectConnectionManager.disconnectAll()
         bluetoothConnectionManager.disconnectAll()
     }
+
+    override fun startServerListener() {
+        bluetoothConnectionManager.startServerListener()
+    }
 }

@@ -21,12 +21,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NetworkWifi
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -113,6 +115,37 @@ fun SettingsScreen(
             },
             dismissButton = {
                 OutlinedButton(onClick = { viewModel.cancelEditingName() }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            }
+        )
+    }
+
+    if (state.isEditingServerUrl) {
+        AlertDialog(
+            onDismissRequest = { viewModel.cancelEditingServerUrl() },
+            containerColor = BgCardDark,
+            title = {
+                Text("Edit Dev Update Server URL", color = TextPrimary)
+            },
+            text = {
+                OutlinedTextField(
+                    value = state.editedServerUrl,
+                    onValueChange = { viewModel.onEditedServerUrlChanged(it) },
+                    singleLine = true,
+                    label = { Text("Server URL (e.g. http://10.33.160.61:8080)") }
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.saveEditedServerUrl() },
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentEmerald, contentColor = Color.Black)
+                ) {
+                    Text("Save", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { viewModel.cancelEditingServerUrl() }) {
                     Text("Cancel", color = TextSecondary)
                 }
             }
@@ -275,6 +308,69 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodySmall,
                         lineHeight = 18.sp
                     )
+                }
+            }
+
+            // Section: App Updates & Dev Sync (Tarika 2)
+            Text("APP UPDATES (OTA DEV SYNC)", color = AccentEmerald, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = BgCardDark),
+                shape = RoundedCornerShape(14.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, BorderSubtle)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF0F2937)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(imageVector = Icons.Default.SystemUpdate, contentDescription = null, tint = AccentCyan, modifier = Modifier.size(20.dp))
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = "In-App Auto-Updater", color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Text(text = "Current: v${state.appVersionName} (Build ${state.appVersionCode})", color = AccentCyan, style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Text("Dev Update Server Endpoint", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = state.updateServerUrl,
+                            color = TextPrimary,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { viewModel.startEditingServerUrl() }) {
+                            Icon(imageVector = Icons.Default.Edit, contentDescription = "Edit Endpoint", tint = AccentCyan, modifier = Modifier.size(18.dp))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Button(
+                        onClick = { viewModel.checkForUpdates() },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = AccentCyan, contentColor = Color.Black)
+                    ) {
+                        Icon(imageVector = Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Check for Updates Now", fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }

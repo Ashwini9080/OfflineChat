@@ -115,9 +115,10 @@ class BluetoothConnectionManager @Inject constructor(
      * Starts listening for incoming RFCOMM connections from nearby compatible peers.
      */
     @SuppressLint("MissingPermission")
-    fun startServerListener() {
+    override fun startServerListener() {
         val adapter = bluetoothAdapter ?: return
-        if (!adapter.isEnabled || isListening.get()) return
+        if (!adapter.isEnabled) return
+        if (isListening.get() && serverSocket != null) return
 
         isListening.set(true)
         serverListenJob?.cancel()
@@ -130,14 +131,22 @@ class BluetoothConnectionManager @Inject constructor(
                     )
                 } catch (e: Exception) {
                     Log.w(TAG, "Insecure RFCOMM listen failed, falling back to secure", e)
-                    adapter.listenUsingRfcommWithServiceRecord(
-                        SERVER_SERVICE_NAME,
-                        BluetoothPeerConnection.SPP_UUID
-                    )
+                    try {
+                        adapter.listenUsingRfcommWithServiceRecord(
+                            SERVER_SERVICE_NAME,
+                            BluetoothPeerConnection.SPP_UUID
+                        )
+                    } catch (e2: Exception) {
+                        Log.w(TAG, "Secure SPP listen failed, trying APP_UUID", e2)
+                        adapter.listenUsingInsecureRfcommWithServiceRecord(
+                            SERVER_SERVICE_NAME,
+                            BluetoothPeerConnection.APP_UUID
+                        )
+                    }
                 }
 
                 serverSocket = server
-                Log.i(TAG, "RFCOMM server socket listening on UUID: ${BluetoothPeerConnection.SPP_UUID}")
+                Log.i(TAG, "RFCOMM server socket listening successfully")
 
                 while (isListening.get()) {
                     val socket: BluetoothSocket = try {
@@ -153,6 +162,7 @@ class BluetoothConnectionManager @Inject constructor(
                 Log.w(TAG, "Server socket encountered exception: ${e.message}")
             } finally {
                 isListening.set(false)
+                serverSocket = null
             }
         }
     }
@@ -162,9 +172,10 @@ class BluetoothConnectionManager @Inject constructor(
         val remoteDevice: BluetoothDevice? = socket.remoteDevice
         val address = remoteDevice?.address ?: "UNKNOWN"
         val name = remoteDevice?.name ?: "Nearby Device"
-        val peerId = address
+        val normalizedId = if (address != "UNKNOWN") address.replace(":", "").lowercase() else address
+        val peerId = normalizedId
 
-        Log.i(TAG, "Incoming Bluetooth RFCOMM connection accepted from: $name [$address]")
+        Log.i(TAG, "Incoming Bluetooth RFCOMM connection accepted from: $name [$address] (peerId: $peerId)")
 
         val incomingPeer = Peer(
             deviceId = peerId,
@@ -175,6 +186,9 @@ class BluetoothConnectionManager @Inject constructor(
             lastSeenAt = System.currentTimeMillis()
         )
         lastKnownPeers[peerId] = incomingPeer
+        if (address != peerId) {
+            lastKnownPeers[address] = incomingPeer
+        }
 
         val peerConnection = BluetoothPeerConnection(
             peerId = peerId,
@@ -187,9 +201,15 @@ class BluetoothConnectionManager @Inject constructor(
         // Close prior connection for this peer
         activeConnections.remove(peerId)?.release()
         activeConnections[peerId] = peerConnection
+        if (address != peerId) {
+            activeConnections[address] = peerConnection
+        }
 
         val stateFlow = getOrCreateStateFlow(peerId)
         stateFlow.value = PeerConnectionState.Connected
+        if (address != peerId) {
+            getOrCreateStateFlow(address).value = PeerConnectionState.Connected
+        }
 
         // Attach incoming socket and start frame reader
         peerConnection.attachSocket(socket, name)
@@ -198,8 +218,14 @@ class BluetoothConnectionManager @Inject constructor(
         scope.launch {
             peerConnection.connectionState.collect { state ->
                 stateFlow.value = state
+                if (address != peerId) {
+                    getOrCreateStateFlow(address).value = state
+                }
                 if (state is PeerConnectionState.Disconnected || state is PeerConnectionState.ConnectionLost) {
                     activeConnections.remove(peerId)
+                    if (address != peerId) {
+                        activeConnections.remove(address)
+                    }
                 }
             }
         }

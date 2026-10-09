@@ -2,10 +2,12 @@ package com.offlinechat.presentation.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.offlinechat.data.local.preferences.AppPreferencesDataStore
 import com.offlinechat.domain.model.TransportType
 import com.offlinechat.domain.repository.PreferencesRepository
 import com.offlinechat.domain.usecase.GetLocalDeviceIdentityUseCase
 import com.offlinechat.domain.usecase.UpdateDisplayNameUseCase
+import com.offlinechat.updater.AppUpdateManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,17 +23,29 @@ data class SettingsUiState(
     val isDarkMode: Boolean = true,
     val isEditingName: Boolean = false,
     val editedName: String = "",
-    val feedbackMessage: String? = null
+    val feedbackMessage: String? = null,
+    val updateServerUrl: String = "http://10.33.160.61:8080",
+    val isEditingServerUrl: Boolean = false,
+    val editedServerUrl: String = "",
+    val appVersionName: String = "1.0.0",
+    val appVersionCode: Int = 1
 )
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val preferencesRepository: PreferencesRepository,
+    private val preferencesDataStore: AppPreferencesDataStore,
+    private val appUpdateManager: AppUpdateManager,
     private val updateDisplayNameUseCase: UpdateDisplayNameUseCase,
     private val getLocalDeviceIdentityUseCase: GetLocalDeviceIdentityUseCase
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(SettingsUiState())
+    private val _uiState = MutableStateFlow(
+        SettingsUiState(
+            appVersionName = appUpdateManager.currentVersionName,
+            appVersionCode = appUpdateManager.currentVersionCode
+        )
+    )
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
 
     init {
@@ -62,6 +76,45 @@ class SettingsViewModel @Inject constructor(
                 _uiState.value = _uiState.value.copy(isDarkMode = dark)
             }
         }
+        viewModelScope.launch {
+            preferencesDataStore.updateServerUrl.collect { url ->
+                _uiState.value = _uiState.value.copy(updateServerUrl = url)
+            }
+        }
+    }
+
+    fun startEditingServerUrl() {
+        _uiState.value = _uiState.value.copy(
+            isEditingServerUrl = true,
+            editedServerUrl = _uiState.value.updateServerUrl
+        )
+    }
+
+    fun onEditedServerUrlChanged(url: String) {
+        _uiState.value = _uiState.value.copy(editedServerUrl = url)
+    }
+
+    fun saveEditedServerUrl() {
+        viewModelScope.launch {
+            val trimmed = _uiState.value.editedServerUrl.trim()
+            if (trimmed.isNotBlank()) {
+                preferencesDataStore.setUpdateServerUrl(trimmed)
+                _uiState.value = _uiState.value.copy(
+                    isEditingServerUrl = false,
+                    feedbackMessage = "Update server URL updated"
+                )
+            } else {
+                _uiState.value = _uiState.value.copy(isEditingServerUrl = false)
+            }
+        }
+    }
+
+    fun cancelEditingServerUrl() {
+        _uiState.value = _uiState.value.copy(isEditingServerUrl = false)
+    }
+
+    fun checkForUpdates() {
+        appUpdateManager.checkForUpdates(silent = false)
     }
 
     fun startEditingName() {
