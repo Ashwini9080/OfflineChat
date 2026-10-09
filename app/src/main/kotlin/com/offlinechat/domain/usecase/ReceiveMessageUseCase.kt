@@ -8,6 +8,7 @@ import com.offlinechat.domain.model.MessageStatus
 import com.offlinechat.domain.repository.ConversationRepository
 import com.offlinechat.domain.repository.MessageRepository
 import com.offlinechat.security.MessageSecurity
+import com.offlinechat.domain.model.TransportType
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
 
@@ -72,7 +73,13 @@ class ReceiveMessageUseCase @Inject constructor(
             return Result.failure(SecurityException("Message integrity authentication failed: ${e.message}", e))
         }
 
-        val conversationId = envelope.conversationId.ifEmpty { envelope.senderId }
+        val conversation = conversationRepository.getConversationById(envelope.conversationId)
+            ?: conversationRepository.getOrCreateConversation(
+                peerId = envelope.senderId,
+                peerDisplayName = "Nearby Peer",
+                transportType = TransportType.BLUETOOTH
+            )
+        val conversationId = conversation.id
 
         val incomingMessage = Message(
             id = envelope.messageId,

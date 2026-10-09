@@ -50,15 +50,20 @@ class MessageRepository @Inject constructor(
     private fun MessageEntity.toDomain(): Message {
         val content = when (contentType) {
             "TEXT" -> {
-                // Decode UTF-8 string from Base64 stored body
                 val bodyText = try {
-                    String(Base64.getDecoder().decode(encryptedBody), Charsets.UTF_8)
+                    String(encryptedBody, Charsets.UTF_8)
                 } catch (e: Exception) {
-                    encryptedBody
+                    ""
                 }
                 MessageContent.Text(bodyText)
             }
-            else -> MessageContent.Text(encryptedBody)
+            "FILE" -> {
+                MessageContent.File(name = String(encryptedBody, Charsets.UTF_8), mimeType = "application/octet-stream", sizeBytes = 0L, chunkCount = 0)
+            }
+            "GROUP_INVITE" -> {
+                MessageContent.GroupInvite(groupId = String(encryptedBody, Charsets.UTF_8), groupName = "", encryptedGroupKey = ByteArray(0))
+            }
+            else -> MessageContent.Text(String(encryptedBody, Charsets.UTF_8))
         }
 
         return Message(
@@ -77,8 +82,9 @@ class MessageRepository @Inject constructor(
 
     private fun Message.toEntity(envelopeId: String?): MessageEntity {
         val (typeStr, bodyPayload) = when (val c = content) {
-            is MessageContent.Text -> "TEXT" to Base64.getEncoder().encodeToString(c.body.toByteArray(Charsets.UTF_8))
-            is MessageContent.File -> "FILE" to c.name
+            is MessageContent.Text -> "TEXT" to c.body.toByteArray(Charsets.UTF_8)
+            is MessageContent.File -> "FILE" to c.name.toByteArray(Charsets.UTF_8)
+            is MessageContent.GroupInvite -> "GROUP_INVITE" to c.groupId.toByteArray(Charsets.UTF_8)
         }
 
         return MessageEntity(

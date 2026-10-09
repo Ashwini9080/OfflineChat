@@ -71,10 +71,14 @@ class ConversationManager @Inject constructor(
             scope.launch { onMessageReceived(message) }
         }
 
-        // React to new channels by starting receive loops
+        // React to new channels by starting receive loops and registering session keys
         transportManager.events
             .filterIsInstance<TransportEvent.ChannelOpened>()
             .onEach { event ->
+                event.channel.sessionKey?.let { key ->
+                    messageSender.registerSessionKey(event.peer.deviceId, key)
+                    messageReceiver.registerSessionKey(event.peer.deviceId, key)
+                }
                 scope.launch {
                     messageReceiver.processChannel(event.channel)
                 }

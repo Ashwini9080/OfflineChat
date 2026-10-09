@@ -98,6 +98,14 @@ fun MessageBubble(
                             fontWeight = FontWeight.Medium
                         )
                     }
+                    is MessageContent.GroupInvite -> {
+                        Text(
+                            text = "👥 Group Invite: ${content.groupName.ifBlank { content.groupId }}",
+                            color = textColor,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
 
                 Row(

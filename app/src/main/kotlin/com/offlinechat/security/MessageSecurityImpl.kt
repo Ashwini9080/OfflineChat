@@ -145,6 +145,15 @@ class MessageSecurityImpl @Inject constructor(
             peerPublicKeyBytes = peerIdentityPubBytes
         )
         activeSessions[payload.deviceId] = session
+        activeSessions[payload.deviceId.lowercase()] = session
+        existingPeer?.let { p ->
+            activeSessions[p.deviceId] = session
+            activeSessions[p.deviceId.lowercase()] = session
+            p.bluetoothAddress?.let { addr ->
+                activeSessions[addr] = session
+                activeSessions[addr.replace(":", "").lowercase()] = session
+            }
+        }
 
         // 5. Persist peer in local Room database with cryptographic metadata
         val peerFingerprint = IdentityManager.computeFingerprint(peerIdentityPubBytes)
@@ -163,6 +172,17 @@ class MessageSecurityImpl @Inject constructor(
             identityFingerprint = peerFingerprint
         )
         peerRepository.saveOrUpdatePeer(updatedPeer)
+        if (existingPeer != null && existingPeer.deviceId != payload.deviceId) {
+            peerRepository.saveOrUpdatePeer(
+                existingPeer.copy(
+                    publicKeyBytes = peerIdentityPubBytes,
+                    trustState = trustState,
+                    safetyNumber = sessionMaterial.safetyNumber,
+                    identityFingerprint = peerFingerprint,
+                    isConnected = true
+                )
+            )
+        }
 
         Log.i(TAG, "Established encrypted session with ${payload.displayName} [${payload.deviceId}], Trust: $trustState, SAS: ${sessionMaterial.safetyNumber}")
 
@@ -175,6 +195,37 @@ class MessageSecurityImpl @Inject constructor(
         )
     }
 
+    private fun resolveSession(peerId: String): PeerSession? {
+        val direct = activeSessions[peerId] ?: activeSessions[peerId.lowercase()]
+        if (direct != null) return direct
+
+        val clean = peerId.trim().lowercase().replace(":", "")
+        val byClean = activeSessions[clean] ?: activeSessions.entries.firstOrNull { (k, _) ->
+            k.trim().lowercase().replace(":", "") == clean
+        }?.value
+        if (byClean != null) {
+            activeSessions[peerId] = byClean
+            return byClean
+        }
+
+        val bySubstring = activeSessions.entries.firstOrNull { (k, _) ->
+            k.contains(peerId, ignoreCase = true) || peerId.contains(k, ignoreCase = true)
+        }?.value
+        if (bySubstring != null) {
+            activeSessions[peerId] = bySubstring
+            return bySubstring
+        }
+
+        // Single active session fallback in direct 1-to-1 offline chats
+        if (activeSessions.isNotEmpty()) {
+            val fallback = activeSessions.values.first()
+            activeSessions[peerId] = fallback
+            return fallback
+        }
+
+        return null
+    }
+
     override suspend fun encryptMessage(
         plaintext: ByteArray,
         recipientPeerId: String,
@@ -185,7 +236,7 @@ class MessageSecurityImpl @Inject constructor(
             throw SecurityException("Transmission blocked: Peer identity is REVOKED due to key change or security policy.")
         }
 
-        val session = activeSessions[recipientPeerId] ?: run {
+        val session = resolveSession(recipientPeerId) ?: run {
             // If session not in memory but peer public key is in Room, derive session
             val peer = peerRepository.getPeerById(recipientPeerId)
             if (peer != null && peer.publicKeyBytes.isNotEmpty()) {
@@ -235,7 +286,7 @@ class MessageSecurityImpl @Inject constructor(
             throw SecurityException("Decryption blocked: Sender cryptographic identity has been REVOKED.")
         }
 
-        val session = activeSessions[senderPeerId] ?: run {
+        val session = resolveSession(senderPeerId) ?: run {
             val peer = peerRepository.getPeerById(senderPeerId)
             if (peer != null && peer.publicKeyBytes.isNotEmpty()) {
                 val material = sessionCrypto.deriveSessionMaterial(
@@ -295,7 +346,11 @@ class MessageSecurityImpl @Inject constructor(
 
     override suspend fun getPeerTrustState(peerId: String): PeerTrustState {
         val peer = peerRepository.getPeerById(peerId)
-        return peer?.trustState ?: PeerTrustState.UNKNOWN
+        if (peer != null) return peer.trustState
+        if (resolveSession(peerId) != null) {
+            return PeerTrustState.CONNECTED
+        }
+        return PeerTrustState.UNKNOWN
     }
 
     override suspend fun verifyPeer(peerId: String) {
@@ -312,11 +367,11 @@ class MessageSecurityImpl @Inject constructor(
     }
 
     override fun getSafetyNumber(peerId: String): String? {
-        return activeSessions[peerId]?.safetyNumber
+        return resolveSession(peerId)?.safetyNumber ?: activeSessions[peerId]?.safetyNumber
     }
 
     override fun hasEstablishedSession(peerId: String): Boolean {
-        return activeSessions.containsKey(peerId)
+        return resolveSession(peerId) != null
     }
 
     override fun sign(data: ByteArray): ByteArray {

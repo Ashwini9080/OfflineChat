@@ -10,6 +10,8 @@ import com.offlinechat.domain.model.PeerTrustState
 import com.offlinechat.domain.repository.ConversationRepository
 import com.offlinechat.domain.repository.MessageRepository
 import com.offlinechat.security.MessageSecurity
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import java.util.Base64
 import java.util.UUID
@@ -76,6 +78,15 @@ class SendMessageUseCase @Inject constructor(
         var nonceBytes: ByteArray? = null
         var signatureBytes: ByteArray? = null
 
+        if (!messageSecurity.hasEstablishedSession(receiverId)) {
+            syncEngine.sendHandshake(receiverId)
+            withTimeoutOrNull(1500) {
+                while (!messageSecurity.hasEstablishedSession(receiverId)) {
+                    delay(100)
+                }
+            }
+        }
+
         try {
             val encryptedPayload = messageSecurity.encryptMessage(
                 plaintext = trimmed.toByteArray(Charsets.UTF_8),
@@ -87,9 +98,9 @@ class SendMessageUseCase @Inject constructor(
             nonceBytes = Base64.getDecoder().decode(encryptedPayload.nonceBase64)
             signatureBytes = Base64.getDecoder().decode(encryptedPayload.signatureBase64)
         } catch (e: Exception) {
-            // If secure session is not available, fail securely
-            messageRepository.updateMessageStatus(messageId, MessageStatus.FAILED)
-            return Result.failure(SecurityException("Encryption failed: ${e.message}", e))
+            // Keep status as PENDING so syncEngine will automatically flush when handshake arrives
+            messageRepository.updateMessageStatus(messageId, MessageStatus.PENDING)
+            return Result.failure(SecurityException("Encryption session pending: ${e.message}", e))
         }
 
         // 5. Prepare transport envelope carrying ONLY encrypted payload

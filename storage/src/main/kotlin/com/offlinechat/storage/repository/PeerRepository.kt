@@ -34,10 +34,10 @@ class PeerRepository @Inject constructor(
         if (existing == null) {
             peerDao.insert(
                 PeerEntity(
-                    deviceId = peer.deviceId,
-                    displayName = peer.displayName,
+                    deviceId = deviceId,
+                    displayName = displayName,
                     publicSigningKeyBase64 = pubKeyB64,
-                    bluetoothAddress = peer.bluetoothAddress,
+                    bluetoothAddress = bluetoothAddress,
                     isTrusted = isTrusted,
                     firstSeenAt = now,
                     lastSeenAt = now,
@@ -45,8 +45,8 @@ class PeerRepository @Inject constructor(
             )
         } else {
             val updated = existing.copy(
-                displayName = peer.displayName.ifBlank { existing.displayName },
-                bluetoothAddress = peer.bluetoothAddress ?: existing.bluetoothAddress,
+                displayName = displayName.ifBlank { existing.displayName },
+                bluetoothAddress = bluetoothAddress ?: existing.bluetoothAddress,
                 lastSeenAt = now,
                 isTrusted = existing.isTrusted || isTrusted,
             )

@@ -22,6 +22,12 @@ dependencyResolutionManagement {
 
 rootProject.name = "OfflineChat"
 
-// Android application containing Clean Architecture:
-// Presentation -> Domain -> Data -> Security -> DI
-include(":app")
+include(
+    ":core",
+    ":security",
+    ":storage",
+    ":transport",
+    ":messaging",
+    ":ui",
+    ":app"
+)

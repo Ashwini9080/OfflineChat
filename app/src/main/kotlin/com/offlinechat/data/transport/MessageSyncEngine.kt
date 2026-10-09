@@ -252,7 +252,21 @@ class MessageSyncEngine @Inject constructor(
             return
         }
 
-        val pending = messageRepository.getPendingOutboundMessagesForPeer(peerId)
+        val pending = messageRepository.getPendingOutboundMessagesForPeer(peerId).toMutableList()
+        val clean = peerId.trim().lowercase().replace(":", "")
+        if (clean != peerId) {
+            val pendingClean = messageRepository.getPendingOutboundMessagesForPeer(clean)
+            for (p in pendingClean) {
+                if (pending.none { it.id == p.id }) pending.add(p)
+            }
+        }
+        val peer = peerRepository.getPeerById(peerId)
+        peer?.bluetoothAddress?.let { addr ->
+            val pendingAddr = messageRepository.getPendingOutboundMessagesForPeer(addr)
+            for (p in pendingAddr) {
+                if (pending.none { it.id == p.id }) pending.add(p)
+            }
+        }
         if (pending.isEmpty()) return
 
         Log.d(TAG, "Flushing ${pending.size} pending offline messages for peer: $peerId")

@@ -93,8 +93,18 @@ class BluetoothConnectionManager @Inject constructor(
     }
 
     override fun isConnected(peerId: String): Boolean {
-        return activeConnections[peerId]?.isConnected == true ||
-                connectionStates[peerId]?.value is PeerConnectionState.Connected
+        val clean = peerId.trim().lowercase().replace(":", "")
+        val conn = activeConnections[peerId]
+            ?: activeConnections[clean]
+            ?: activeConnections.entries.firstOrNull { (k, _) ->
+                k.trim().lowercase().replace(":", "") == clean
+            }?.value
+            ?: activeConnections.values.firstOrNull()
+
+        return conn?.isConnected == true ||
+                connectionStates[peerId]?.value is PeerConnectionState.Connected ||
+                connectionStates[clean]?.value is PeerConnectionState.Connected ||
+                (activeConnections.isNotEmpty() && activeConnections.values.any { it.isConnected })
     }
 
     override fun getActiveConnection(peerId: String): PeerConnection? {
@@ -267,6 +277,10 @@ class BluetoothConnectionManager @Inject constructor(
 
             activeConnections.remove(peer.deviceId)?.release()
             activeConnections[peer.deviceId] = peerConnection
+            peer.bluetoothAddress?.let { addr ->
+                activeConnections[addr] = peerConnection
+                activeConnections[addr.replace(":", "").lowercase()] = peerConnection
+            }
 
             val stateObservationJob = scope.launch {
                 peerConnection.connectionState.collect { state ->
@@ -295,6 +309,7 @@ class BluetoothConnectionManager @Inject constructor(
 
             return try {
                 connectJob.join()
+                stateFlow.value = peerConnection.connectionState.value
                 stateObservationJob.cancel()
                 if (peerConnection.isConnected) {
                     Result.success(Unit)
@@ -342,8 +357,17 @@ class BluetoothConnectionManager @Inject constructor(
      * Serializes and transmits a [MessageEnvelope] across the active RFCOMM connection for [peerId].
      */
     suspend fun sendEnvelope(peerId: String, envelope: MessageEnvelope): Result<Unit> {
+        val clean = peerId.trim().lowercase().replace(":", "")
         val activeConn = activeConnections[peerId]
+            ?: activeConnections[clean]
+            ?: activeConnections.entries.firstOrNull { (k, _) ->
+                k.trim().lowercase().replace(":", "") == clean
+            }?.value
+            ?: activeConnections.values.firstOrNull { it.isConnected }
             ?: return Result.failure(IllegalStateException("No active Bluetooth connection to peer $peerId"))
+
+        activeConnections[peerId] = activeConn
+        activeConnections[clean] = activeConn
 
         return try {
             val jsonString = json.encodeToString(MessageEnvelope.serializer(), envelope)

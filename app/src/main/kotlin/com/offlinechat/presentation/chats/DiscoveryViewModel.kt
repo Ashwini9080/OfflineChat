@@ -16,7 +16,9 @@ import com.offlinechat.domain.usecase.GetLocalDeviceIdentityUseCase
 import com.offlinechat.service.ConnectionForegroundService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import android.util.Log
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -120,6 +122,9 @@ class DiscoveryViewModel @Inject constructor(
                         }
                     }
                 }
+
+                // Automatic Connection: Auto-connect to discovered peer if not connected/connecting
+                autoConnectIfPossible(list)
             }
         }
         viewModelScope.launch {
@@ -327,12 +332,7 @@ class DiscoveryViewModel @Inject constructor(
     fun onConnectClicked(peer: Peer) {
         // Prevent concurrent multiple connection attempts to the same or conflicting peer
         if (_uiState.value.connectingPeerId != null) return
-
-        if (!peer.isTrusted) {
-            _uiState.value = _uiState.value.copy(pendingTrustPeer = peer)
-        } else {
-            connectToPeer(peer)
-        }
+        connectToPeer(peer)
     }
 
     fun onCancelConnectClicked(peer: Peer) {
@@ -386,6 +386,30 @@ class DiscoveryViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(pendingTrustPeer = null)
     }
 
+    private var lastAutoConnectAttemptMs = 0L
+
+    private fun autoConnectIfPossible(list: List<Peer>) {
+        val now = System.currentTimeMillis()
+        if (now - lastAutoConnectAttemptMs < 3000) return
+
+        val currentState = _uiState.value
+        if (currentState.connectingPeerId != null) return
+
+        val isAnyConnected = currentState.peerStates.values.any { it is PeerConnectionState.Connected } ||
+                currentState.peers.any { it.isConnected } ||
+                list.any { it.isConnected }
+        if (isAnyConnected) return
+
+        val candidate = list.firstOrNull { peer ->
+            val state = currentState.peerStates[peer.deviceId]
+            !peer.isConnected && state !is PeerConnectionState.Connected && state !is PeerConnectionState.Connecting
+        } ?: return
+
+        lastAutoConnectAttemptMs = now
+        Log.i("DiscoveryViewModel", "Auto-connecting to discovered peer: ${candidate.displayName} [${candidate.deviceId}]")
+        connectToPeer(candidate)
+    }
+
     private fun connectToPeer(peer: Peer) {
         if (_uiState.value.connectingPeerId == peer.deviceId) return
 
@@ -408,10 +432,22 @@ class DiscoveryViewModel @Inject constructor(
                 )
             } else {
                 val failureMsg = result.exceptionOrNull()?.message ?: "Failed to connect to peer"
+                Log.w("DiscoveryViewModel", "Connection to ${peer.displayName} failed: $failureMsg. Scheduling auto-retry in 2s...")
                 _uiState.value = _uiState.value.copy(
                     errorMessage = failureMsg,
                     peerStates = _uiState.value.peerStates + (peer.deviceId to PeerConnectionState.ConnectionFailed(failureMsg))
                 )
+                // Auto-retry connection after 2 seconds
+                launch {
+                    delay(2000)
+                    val stillDisconnected = !connectionManager.isConnected(peer.deviceId) &&
+                            _uiState.value.connectingPeerId == null &&
+                            !_uiState.value.peers.any { it.isConnected }
+                    if (stillDisconnected) {
+                        Log.i("DiscoveryViewModel", "Auto-retrying connection to ${peer.displayName}...")
+                        connectToPeer(peer)
+                    }
+                }
             }
         }
     }

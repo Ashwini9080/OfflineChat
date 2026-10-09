@@ -33,6 +33,9 @@ interface TransportChannel {
     /** Whether the underlying socket is still connected. */
     val isConnected: Boolean
 
+    /** Derived AES-256 session key established via authenticated ECDH handshake, if available. */
+    val sessionKey: javax.crypto.SecretKey? get() = null
+
     /**
      * Sends raw [data] bytes to the peer.
      *

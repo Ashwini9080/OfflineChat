@@ -37,8 +37,8 @@ if (Test-Path $apkPath) {
     $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     
     $updateData = [ordered]@{
-        versionCode   = 2
-        versionName   = "1.0.1"
+        versionCode   = 3
+        versionName   = "1.0.2"
         apkUrl        = "http://${wifiIp}:8080/app-debug.apk"
         fileSizeBytes = $size
         changelog     = "Auto-updated from laptop at $timestamp"

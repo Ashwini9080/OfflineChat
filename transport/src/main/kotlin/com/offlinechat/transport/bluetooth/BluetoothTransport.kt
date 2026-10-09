@@ -21,16 +21,18 @@ import com.offlinechat.transport.api.TransportChannel
 import com.offlinechat.transport.api.TransportEvent
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.util.Base64
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -39,27 +41,6 @@ import javax.inject.Singleton
  * [Transport] implementation that uses:
  * - **BLE advertising/scanning** for device discovery (via [BleAdvertiser] / [BleScanner])
  * - **Bluetooth Classic RFCOMM** for data transfer (via [RfcommChannel])
- *
- * ## Connection flow
- *
- * ### Outbound (this device connects TO a peer)
- * 1. [BleScanner] discovers peer → [TransportEvent.PeerDiscovered] emitted.
- * 2. Caller calls [connect] with that [PeerDevice].
- * 3. An RFCOMM socket is opened to the peer's Bluetooth MAC address.
- * 4. Both sides exchange [DeviceCertificate]s as the first frames on the socket.
- * 5. [IdentityManager.verifyCertificate] validates the peer's certificate.
- * 6. [SessionCrypto.generateEphemeralDhKeyPair] + ECDH produces session key.
- * 7. [RfcommChannel] is returned to the caller.
- *
- * ### Inbound (a peer connects TO this device)
- * 1. [listen] maintains a [BluetoothServerSocket] in the background.
- * 2. Each accepted socket goes through the same handshake as the outbound path.
- * 3. Completed channels are emitted from the [listen] flow.
- *
- * ## Permissions
- * Requires BLUETOOTH_CONNECT and BLUETOOTH_SCAN (API 31+) or BLUETOOTH (API ≤30).
- * [BluetoothTransport] does NOT request permissions — that is the UI layer's job.
- * If permissions are absent, methods return [AppError.BluetoothPermissionDenied].
  */
 @SuppressLint("MissingPermission")
 @Singleton
@@ -80,6 +61,7 @@ class BluetoothTransport @Inject constructor(
         val RFCOMM_UUID: UUID = UUID.fromString("B2C3D4E5-F6A7-8901-BCDE-F12345678901")
 
         private const val SERVER_NAME = "OfflineChat"
+        private const val CONNECT_TIMEOUT_MS = 15_000L
     }
 
     override val type: TransportType = TransportType.BLUETOOTH
@@ -105,11 +87,6 @@ class BluetoothTransport @Inject constructor(
 
     /**
      * Starts BLE scanning and bridges scan events to [TransportEvent]s.
-     *
-     * Discovered peers emit [TransportEvent.PeerDiscovered] immediately from the
-     * BLE advertisement — without waiting for RFCOMM. The full identity is only
-     * confirmed during the handshake, but the partial peer is sufficient for the
-     * UI to show "X is nearby, tap to chat".
      */
     override suspend fun startDiscovery(): AppResult<Unit> {
         val scanResult = bleScanner.scan(lowPower = false)
@@ -134,75 +111,101 @@ class BluetoothTransport @Inject constructor(
 
     override suspend fun stopDiscovery() {
         // Scanning is stopped by cancelling the coroutine collecting the scan Flow.
-        // BluetoothTransport's holder (TransportManager) is responsible for that cancellation.
     }
 
     /**
      * Opens an RFCOMM socket to [peer] and performs the identity handshake.
-     *
-     * This call blocks until the connection is established and the handshake
-     * completes (or fails). On success, returns a ready-to-use [RfcommChannel].
      */
     override suspend fun connect(peer: PeerDevice): AppResult<TransportChannel> {
         val btAddress = peer.bluetoothAddress
             ?: return AppResult.Failure(AppError.PeerNotReachable)
 
+        val adapter = getBluetoothAdapter()
+            ?: return AppResult.Failure(AppError.BluetoothNotAvailable)
+
+        if (!adapter.isEnabled) {
+            return AppResult.Failure(AppError.BluetoothNotAvailable)
+        }
+
         return withContext(Dispatchers.IO) {
-            runCatching {
-                val adapter = getBluetoothAdapter()
-                    ?: error("Bluetooth not available")
-                val remoteDevice: BluetoothDevice = adapter.getRemoteDevice(btAddress)
+            var socket: BluetoothSocket? = null
+            try {
+                withTimeout(CONNECT_TIMEOUT_MS) {
+                    val remoteDevice: BluetoothDevice = adapter.getRemoteDevice(btAddress)
+                    val s: BluetoothSocket = remoteDevice.createRfcommSocketToServiceRecord(RFCOMM_UUID)
+                    socket = s
 
-                val socket: BluetoothSocket = remoteDevice
-                    .createRfcommSocketToServiceRecord(RFCOMM_UUID)
+                    // Stop discovery during connection to improve success rate
+                    adapter.cancelDiscovery()
 
-                // Stop discovery during connection to improve success rate
-                adapter.cancelDiscovery()
+                    s.connect()
 
-                socket.connect()  // Blocking connect
+                    val handshakeResult = performHandshake(s, peer)
+                    if (handshakeResult is AppResult.Failure) {
+                        throw (handshakeResult.cause ?: Exception("Handshake failed: ${handshakeResult.error}"))
+                    }
 
-                performHandshake(socket, peer)
-            }.fold(
-                onSuccess = { it },
-                onFailure = { e ->
-                    _events.emit(
-                        TransportEvent.ConnectionFailed(
-                            peerId = peer.deviceId,
-                            reason = e.message ?: "Unknown",
-                        ),
-                    )
-                    AppResult.Failure(AppError.PeerNotReachable, e)
-                },
-            )
+                    (handshakeResult as AppResult.Success).data
+                }.let { channel ->
+                    AppResult.Success(channel)
+                }
+            } catch (e: Throwable) {
+                runCatching { socket?.close() }
+                val reason = e.message ?: "RFCOMM connect failed"
+                _events.emit(
+                    TransportEvent.ConnectionFailed(
+                        peerId = peer.deviceId,
+                        reason = reason,
+                    ),
+                )
+                AppResult.Failure(AppError.PeerNotReachable, e)
+            }
         }
     }
 
     /**
      * Listens for incoming RFCOMM connections.
-     *
-     * Each accepted connection goes through [performHandshake] before being
-     * emitted. Invalid or failed handshakes are dropped with a log entry.
-     *
-     * This flow runs indefinitely on [Dispatchers.IO]. Collect it in a
-     * coroutine tied to the service/foreground-notification lifecycle.
      */
     override fun listen(): Flow<AppResult<TransportChannel>> = flow {
         val adapter = getBluetoothAdapter() ?: run {
-            emit(AppResult.Failure<TransportChannel>(AppError.BluetoothNotAvailable))
+            emit(AppResult.Failure(AppError.BluetoothNotAvailable))
             return@flow
         }
 
-        val server = adapter.listenUsingRfcommWithServiceRecord(SERVER_NAME, RFCOMM_UUID)
+        if (!adapter.isEnabled) {
+            emit(AppResult.Failure(AppError.BluetoothNotAvailable))
+            return@flow
+        }
+
+        val server = try {
+            adapter.listenUsingRfcommWithServiceRecord(SERVER_NAME, RFCOMM_UUID)
+        } catch (e: Exception) {
+            _events.emit(TransportEvent.TransportError(e, "Failed to start RFCOMM server listener"))
+            emit(AppResult.Failure(AppError.BluetoothPermissionDenied, e))
+            return@flow
+        }
         serverSocket = server
 
         try {
             while (true) {
-                val socket = server.accept()  // Blocking — waits for a client
+                val socket = try {
+                    server.accept()  // Blocking — waits for a client
+                } catch (e: Exception) {
+                    break
+                }
                 val channelResult = performHandshake(socket, peerFromSocket = null)
+                if (channelResult is AppResult.Failure) {
+                    _events.emit(
+                        TransportEvent.ConnectionFailed(
+                            peerId = "inbound",
+                            reason = "Inbound handshake failed: ${channelResult.error}",
+                        ),
+                    )
+                }
                 emit(channelResult)
             }
         } finally {
-            server.close()
+            runCatching { server.close() }
             serverSocket = null
         }
     }.flowOn(Dispatchers.IO)
@@ -219,21 +222,6 @@ class BluetoothTransport @Inject constructor(
 
     /**
      * Performs the RFCOMM identity + key exchange handshake.
-     *
-     * Protocol (both sides do the same steps simultaneously):
-     * 1. Generate ephemeral DH keypair.
-     * 2. Issue a [DeviceCertificate] containing the ephemeral DH public key.
-     * 3. Serialise and send the certificate as the first frame.
-     * 4. Receive and deserialise the peer's certificate.
-     * 5. Verify the peer's certificate signature and ID derivation.
-     * 6. Run ECDH to derive the shared secret.
-     * 7. Derive the AES-256 session key via HKDF.
-     *
-     * After this, the [RfcommChannel] is ready for encrypted message exchange.
-     *
-     * @param socket       The connected RFCOMM socket.
-     * @param peerFromSocket A partial [PeerDevice] from BLE (outbound calls) or
-     *                     null (inbound — identity comes from the certificate).
      */
     private suspend fun performHandshake(
         socket: BluetoothSocket,
@@ -241,23 +229,27 @@ class BluetoothTransport @Inject constructor(
     ): AppResult<TransportChannel> = withContext(Dispatchers.IO) {
         runCatching {
             // Step 1: Generate ephemeral DH keypair for this session
-            val ephemeralKeyPairResult = sessionCrypto.generateEphemeralDhKeyPair()
-            val ephemeralKeyPair = (ephemeralKeyPairResult as AppResult.Success).data
+            val ephemeralKeyPair = when (val res = sessionCrypto.generateEphemeralDhKeyPair()) {
+                is AppResult.Success -> res.data
+                is AppResult.Failure -> error("Failed to generate ephemeral DH keypair: ${res.error}")
+            }
 
             // Step 2: Issue our certificate
-            val certResult = identityManager.issueCertificate(ephemeralKeyPair.public)
-            val ourCert = (certResult as AppResult.Success).data
+            val ourCert = when (val res = identityManager.issueCertificate(ephemeralKeyPair.public)) {
+                is AppResult.Success -> res.data
+                is AppResult.Failure -> error("Failed to issue certificate: ${res.error}")
+            }
 
             // Step 3: Send our certificate
             val certJson = Json.encodeToString(DeviceCertificate.serializer(), ourCert)
             val certBytes = certJson.toByteArray(Charsets.UTF_8)
-            val dataOut = java.io.DataOutputStream(socket.outputStream)
+            val dataOut = DataOutputStream(socket.outputStream)
             dataOut.writeInt(certBytes.size)
             dataOut.write(certBytes)
             dataOut.flush()
 
             // Step 4: Receive peer's certificate
-            val dataIn = java.io.DataInputStream(socket.inputStream)
+            val dataIn = DataInputStream(socket.inputStream)
             val peerCertLength = dataIn.readInt()
             require(peerCertLength in 1..65_536) { "Invalid cert length: $peerCertLength" }
             val peerCertBytes = ByteArray(peerCertLength)
@@ -268,22 +260,33 @@ class BluetoothTransport @Inject constructor(
             )
 
             // Step 5: Verify peer's certificate
-            val verifyResult = identityManager.verifyCertificate(peerCert)
-            require(verifyResult is AppResult.Success) { "Peer certificate verification failed" }
+            when (val res = identityManager.verifyCertificate(peerCert)) {
+                is AppResult.Success -> { /* valid */ }
+                is AppResult.Failure -> error("Peer certificate verification failed: ${res.error}")
+            }
 
             // Decode the peer's ephemeral DH public key
-            val peerDhKeyBytes = java.util.Base64.getDecoder().decode(peerCert.publicDhKeyBase64)
+            val peerDhKeyBytes = try {
+                Base64.getDecoder().decode(peerCert.publicDhKeyBase64)
+            } catch (e: Exception) {
+                error("Failed to decode peer DH key: ${e.message}")
+            }
 
             // Step 6: ECDH
-            val sharedSecretResult = sessionCrypto.computeSharedSecret(
+            val sharedSecret = when (val res = sessionCrypto.computeSharedSecret(
                 ourEphemeralPrivateKey = ephemeralKeyPair.private,
                 peerEphemeralPublicKeyBytes = peerDhKeyBytes,
-            )
-            val sharedSecret = (sharedSecretResult as AppResult.Success).data
+            )) {
+                is AppResult.Success -> res.data
+                is AppResult.Failure -> error("ECDH computeSharedSecret failed: ${res.error}")
+            }
 
             // Step 7: Derive session key with HKDF
-            // Canonical ordering: alphabetically smaller ID is "initiator"
-            val localId = (identityManager.getLocalIdentity() as AppResult.Success).data.id
+            val localIdentity = when (val res = identityManager.getLocalIdentity()) {
+                is AppResult.Success -> res.data
+                is AppResult.Failure -> error("Failed to get local identity: ${res.error}")
+            }
+            val localId = localIdentity.id
             val peerId = peerCert.deviceId
             val (initiatorId, responderId) = if (localId < peerId) {
                 localId to peerId
@@ -291,25 +294,34 @@ class BluetoothTransport @Inject constructor(
                 peerId to localId
             }
 
-            val sessionKeyResult = sessionCrypto.deriveSessionKey(sharedSecret, initiatorId, responderId)
-            // Session key stored in RfcommChannel — used by messaging layer via SessionCrypto
+            val sessionKey = when (val res = sessionCrypto.deriveSessionKey(sharedSecret, initiatorId, responderId)) {
+                is AppResult.Success -> res.data
+                is AppResult.Failure -> error("deriveSessionKey failed: ${res.error}")
+            }
 
             // Build the final PeerDevice with full key material from the certificate
-            val signingKeyBytes = java.util.Base64.getDecoder()
-                .decode(peerCert.publicSigningKeyBase64)
+            val signingKeyBytes = try {
+                Base64.getDecoder().decode(peerCert.publicSigningKeyBase64)
+            } catch (e: Exception) {
+                error("Failed to decode peer signing key: ${e.message}")
+            }
 
             val finalPeer = PeerDevice(
                 deviceId = peerCert.deviceId,
                 displayName = peerCert.displayName,
-                bluetoothAddress = socket.remoteDevice?.address,
+                bluetoothAddress = socket.remoteDevice?.address ?: peerFromSocket?.bluetoothAddress,
                 publicSigningKeyBytes = signingKeyBytes,
                 publicDhKeyBytes = peerDhKeyBytes,
-                rssi = 0, // Not available post-connection
+                rssi = peerFromSocket?.rssi ?: 0,
                 transport = TransportType.BLUETOOTH,
                 discoveredAt = timeProvider.nowMillis(),
             )
 
-            val channel = RfcommChannel(socket = socket, peerId = peerId)
+            val channel = RfcommChannel(
+                socket = socket,
+                peerId = peerId,
+                sessionKey = sessionKey,
+            )
             _events.emit(TransportEvent.ChannelOpened(peer = finalPeer, channel = channel))
 
             channel as TransportChannel

@@ -41,6 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class RfcommChannel(
     private val socket: BluetoothSocket,
     override val peerId: String,
+    override val sessionKey: javax.crypto.SecretKey? = null,
 ) : TransportChannel {
 
     companion object {

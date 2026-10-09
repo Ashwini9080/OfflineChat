@@ -52,6 +52,8 @@ class DeviceDiscoveryViewModel @Inject constructor(
     private val _navEvents = MutableSharedFlow<DiscoveryNavEvent>()
     val navEvents: SharedFlow<DiscoveryNavEvent> = _navEvents.asSharedFlow()
 
+    private val pendingTrustedPeerIds = mutableSetOf<String>()
+
     init {
         loadIdentity()
         observeTransportEvents()
@@ -112,6 +114,21 @@ class DeviceDiscoveryViewModel @Inject constructor(
                             connectingPeerId = null,
                             connectedPeerIds = connected
                         )
+
+                        // Bind verified public signing key and finalize trust upon authenticated handshake completion
+                        if (event.peer.publicSigningKeyBytes.isNotEmpty()) {
+                            val isUserApproved = pendingTrustedPeerIds.contains(peerId) ||
+                                (peerRepository.getPeer(peerId)?.isTrusted == true)
+                            peerRepository.saveOrUpdatePeer(
+                                deviceId = peerId,
+                                displayName = event.peer.displayName,
+                                publicSigningKeyBytes = event.peer.publicSigningKeyBytes,
+                                bluetoothAddress = event.peer.bluetoothAddress,
+                                isTrusted = isUserApproved,
+                            )
+                            pendingTrustedPeerIds.remove(peerId)
+                        }
+
                         val localId = _uiState.value.localIdentity?.id ?: ""
                         val convo = conversationRepository.getOrCreateDirectConversation(localId, peerId)
                         _navEvents.emit(
@@ -127,6 +144,7 @@ class DeviceDiscoveryViewModel @Inject constructor(
                         _uiState.value = _uiState.value.copy(connectedPeerIds = connected)
                     }
                     is TransportEvent.ConnectionFailed -> {
+                        pendingTrustedPeerIds.remove(event.peerId)
                         _uiState.value = _uiState.value.copy(
                             connectingPeerId = null,
                             errorMessage = "Failed to connect to peer: ${event.reason}"
@@ -144,13 +162,13 @@ class DeviceDiscoveryViewModel @Inject constructor(
 
     fun onPeerSelected(peer: PeerDevice) {
         viewModelScope.launch {
-            // Check if already trusted in PeerRepository
+            // Check if already trusted in PeerRepository with a verified non-empty key
             val peerRecord = peerRepository.getPeer(peer.deviceId)
-            if (peerRecord != null && peerRecord.isTrusted) {
-                // Already trusted — initiate connection directly
+            if (peerRecord != null && peerRecord.isTrusted && peerRecord.publicSigningKeyBase64.isNotEmpty()) {
+                // Already verified & trusted — initiate connection directly
                 connectToPeer(peer)
             } else {
-                // First contact — show TOFU verification dialog
+                // First contact or unverified key — show TOFU verification dialog
                 _uiState.value = _uiState.value.copy(pendingTrustPeer = peer)
             }
         }
@@ -158,19 +176,18 @@ class DeviceDiscoveryViewModel @Inject constructor(
 
     fun confirmTrust(peer: PeerDevice) {
         viewModelScope.launch {
-            peerRepository.saveOrUpdatePeer(
-                deviceId = peer.deviceId,
-                displayName = peer.displayName,
-                publicSigningKeyBytes = peer.publicSigningKeyBytes,
-                bluetoothAddress = peer.bluetoothAddress,
-                isTrusted = true
-            )
+            // Record user confirmation; the verified key will be bound upon successful handshake in ChannelOpened
+            pendingTrustedPeerIds.add(peer.deviceId)
             _uiState.value = _uiState.value.copy(pendingTrustPeer = null)
             connectToPeer(peer)
         }
     }
 
     fun dismissTrustDialog() {
+        val peerId = _uiState.value.pendingTrustPeer?.deviceId
+        if (peerId != null) {
+            pendingTrustedPeerIds.remove(peerId)
+        }
         _uiState.value = _uiState.value.copy(pendingTrustPeer = null)
     }
 
